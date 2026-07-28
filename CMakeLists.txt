@@ -21,6 +21,7 @@ option(WITH_MIGRATE "Build migration tool. Requires SQLite3." OFF)
 option(WITH_MILENAGE "Build the Milenage / 5G-AKA wrapped-credential vendor PKCS#11 mechanisms. Requires WITH_CRYPTO_BACKEND=openssl. See doc/MILENAGE-5G-AKA-DESIGN.md." OFF)
 option(WITH_MILENAGE_TEST_RAND "Allow caller-supplied RAND in the 5G HE AV mechanism for deterministic testing. Requires WITH_MILENAGE. Never enable in production." OFF)
 option(WITH_MILENAGE_PLAINTEXT_PROVISIONING "Enable the plaintext-input provisioning mechanism (development/PoC only). Requires WITH_MILENAGE. Never enable in production." OFF)
+option(WITH_MILENAGE_TRANSPORT_IMPORT "Enable the transport-wrapped credential import mechanism (CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED) and its separate Transport KEK. Requires WITH_MILENAGE." OFF)
 set(WITH_CRYPTO_BACKEND "openssl"
     CACHE STRING "Select crypto backend (openssl|botan)")
 set(WITH_P11_KIT ""

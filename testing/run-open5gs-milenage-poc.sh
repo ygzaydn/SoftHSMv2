@@ -161,7 +161,7 @@ echo "-- resynchronization --"
 # with an invalid-MAC-S failure; this script does not attempt to
 # construct a valid AUTS (that requires an f5*/f1* implementation this
 # script deliberately does not duplicate -- see
-# src/lib/milenage/test/standalone_selftest.cpp for the positive-path
+# src/lib/milenage/test/milenage_kat_test.cpp for the positive-path
 # resync round trip against the algorithm implementation directly).
 RAND_HEX=$(python3 -c "print(bytes(range(0x10,0x20)).hex())")
 AUTS_HEX=$(python3 -c "print(bytes([0xAA ^ i for i in range(14)]).hex())")

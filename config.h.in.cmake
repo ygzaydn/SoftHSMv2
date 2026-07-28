@@ -172,6 +172,9 @@
 /* Enable plaintext-input credential provisioning (development/PoC only) */
 #cmakedefine WITH_MILENAGE_PLAINTEXT_PROVISIONING @WITH_MILENAGE_PLAINTEXT_PROVISIONING@
 
+/* Enable the transport-wrapped credential import mechanism and Transport KEK */
+#cmakedefine WITH_MILENAGE_TRANSPORT_IMPORT @WITH_MILENAGE_TRANSPORT_IMPORT@
+
 /* Compile with OpenSSL support */
 #cmakedefine WITH_OPENSSL @WITH_OPENSSL@
 

@@ -2,11 +2,11 @@
  * Vendor-defined PKCS#11 interface for Milenage / 5G-AKA wrapped
  * subscriber credentials.
  *
- * See doc/MILENAGE-5G-AKA-DESIGN.md for the full design. This header
- * currently defines only constants (mechanism IDs, wire-format tags,
- * envelope layout, master-key template values). No behavior is
- * implemented yet — nothing in src/lib/milenage/ is wired into
- * SoftHSM's mechanism dispatch or build files.
+ * See doc/MILENAGE-5G-AKA-DESIGN.md for the full design and current
+ * implementation status. This header defines the mechanism IDs,
+ * wire-format tags, envelope layouts, and key templates used by
+ * src/lib/milenage/ and its PKCS#11 wiring in src/lib/SoftHSM.cpp
+ * (build-gated by WITH_MILENAGE and its sub-flags).
  *
  * WARNING: SoftHSMv2 is a software PKCS#11 implementation. It does not
  * provide hardware isolation. A privileged attacker who can read the
@@ -51,6 +51,45 @@ extern "C" {
 #define SOFTHSM_MILENAGE_MASTER_KEY_LABEL   "open5gs-milenage-master"
 #define SOFTHSM_MILENAGE_MASTER_KEY_ID_BYTE 0x01
 #define SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN 32 /* AES-256 */
+
+/* ---------------------------------------------------------------------
+ * Transport KEK template (design doc section 5.2 / task item 6).
+ * Cryptographically separate key from the Master Storage Key: never
+ * used for AV generation, and the Master Storage Key is never used
+ * for transport import. Same non-extractable/non-generic-API-usable
+ * shape as the Master Storage Key, restricted to
+ * CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED only.
+ * ------------------------------------------------------------------- */
+#define SOFTHSM_MILENAGE_TRANSPORT_KEK_LABEL   "open5gs-milenage-transport-kek"
+#define SOFTHSM_MILENAGE_TRANSPORT_KEK_ID_BYTE 0x02
+#define SOFTHSM_MILENAGE_TRANSPORT_KEK_VALUE_LEN 32 /* AES-256 */
+
+/* ---------------------------------------------------------------------
+ * Transport-wrapped provisioning package (design doc section 6).
+ * Distinct format and magic from the credential envelope below --
+ * this is what an external provisioning authority sends in; it is
+ * never what gets stored in the UDM database (that is always the
+ * credential envelope, wrapped under the Master Storage Key).
+ * ------------------------------------------------------------------- */
+#define SOFTHSM_MILENAGE_TRANSPORT_MAGIC          "S5GT" /* 4 bytes, no NUL */
+#define SOFTHSM_MILENAGE_TRANSPORT_VERSION        0x01
+#define SOFTHSM_MILENAGE_TRANSPORT_KEY_VERSION    0x01
+#define SOFTHSM_MILENAGE_TRANSPORT_BINDING_CONTEXT "open5gs-milenage-transport-v1:"
+/* offset 0  magic[4]  "S5GT"
+ * offset 4  version               1 byte
+ * offset 5  secret_type           1 byte (K=1, OPc=2)
+ * offset 6  transport_key_version 1 byte
+ * offset 7  reserved              1 byte, must be 0
+ * offset 8  subscriber_binding[32]
+ * offset 40 transaction_id_len    1 byte, 0..32
+ * offset 41 transaction_id[32]    fixed-size field, only the first
+ *                                 transaction_id_len bytes are
+ *                                 meaningful, the rest must be zero
+ * offset 73 secret_length         2 bytes BE, must be 16
+ * offset 75 secret_value[16]
+ * total: 91 bytes plaintext, before AES-KWP wrapping.
+ */
+#define SOFTHSM_MILENAGE_TRANSPORT_PLAINTEXT_LEN 91
 
 /* ---------------------------------------------------------------------
  * Credential envelope (spec section 6 / design doc section 9).
@@ -130,6 +169,21 @@ typedef enum {
     SOFTHSM_MILENAGE_TAG_OUT_WRAPPED_K   = 0x0106,
     SOFTHSM_MILENAGE_TAG_OUT_WRAPPED_OPC = 0x0107
 } softhsm_milenage_tag_t;
+
+/* Mechanism parameter for CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED
+ * (WITH_MILENAGE_TRANSPORT_IMPORT), passed as pMechanism->pParameter
+ * to C_SignInit. The mechanism's hKey is the Transport KEK (validated
+ * against the template in section 5.2 of the design doc); this
+ * mechanism additionally needs the token's Master Storage Key to
+ * re-wrap the imported secrets, which standard PKCS#11 has no way to
+ * pass except through a mechanism parameter -- masterKeyHandle is
+ * that second key handle, explicitly supplied by the caller (not
+ * looked up implicitly by label/ID inside SoftHSM), and is
+ * independently re-validated server-side against the Master Storage
+ * Key template exactly like every other mechanism in this file does. */
+typedef struct CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS {
+    CK_OBJECT_HANDLE masterKeyHandle;
+} CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS;
 
 #ifdef __cplusplus
 }

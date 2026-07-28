@@ -162,7 +162,7 @@ int main()
     // --- Resync ---
     // Build a valid AUTS the same way MilenageService derived AK*/MAC-S,
     // by round-tripping through the low-level primitives directly is
-    // out of scope here (covered in standalone_selftest.cpp); here we
+    // out of scope here (covered in milenage_kat_test.cpp); here we
     // just check malformed/garbage AUTS is rejected end to end.
     uint8_t randFixed[16]; for (int i=0;i<16;i++) randFixed[i] = (uint8_t)(0x10+i);
     uint8_t garbageAuts[14]; for (int i=0;i<14;i++) garbageAuts[i] = (uint8_t)(0xAA ^ i);

@@ -889,6 +889,9 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 #ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
 	t["CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED"] = CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED;
 #endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+	t["CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED"] = CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED;
+#endif
 #endif
 
 	supportedMechanisms.clear();
@@ -4131,6 +4134,9 @@ static bool isMilenageMechanism(CK_MECHANISM_PTR pMechanism)
 #ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
 		case CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED:
 #endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+		case CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED:
+#endif
 			return true;
 		default:
 			return false;
@@ -4846,7 +4852,13 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 // mechanism list but the wrong other attributes (e.g. CKA_EXTRACTABLE
 // left TRUE by a misconfigured provisioning step) must still be
 // rejected here.
-static bool isValidMilenageMasterKey(Token* token, OSObject* key)
+// Verifies the shared attribute shape used by both the Master Storage
+// Key (section 5.1) and the Transport KEK (section 5.2): AES-256,
+// non-extractable, sensitive, non-modifiable/copyable, unusable via
+// ordinary encrypt/decrypt/wrap/unwrap/derive, sign-capable, and
+// matching the given label/id constants exactly.
+static bool isValidMilenageKeyTemplate(Token* token, OSObject* key,
+                                        const std::string& expectedLabel, uint8_t expectedId)
 {
 #define MILENAGE_KEY_CHECK(cond, name) \
 	do { if (!(cond)) { return false; } } while (0)
@@ -4863,8 +4875,7 @@ static bool isValidMilenageMasterKey(Token* token, OSObject* key)
 	// Note: CKA_VALUE is not checked here -- for a CKA_PRIVATE object it
 	// is stored encrypted at rest, so its stored byte length is not the
 	// plaintext key length. The actual 32-byte length requirement is
-	// enforced after decryption via getSymmetricKey() in
-	// MilenageSignInit, below.
+	// enforced after decryption via getSymmetricKey() in the caller.
 	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_EXTRACTABLE, true), "CKA_EXTRACTABLE");
 	MILENAGE_KEY_CHECK(key->getBooleanValue(CKA_SENSITIVE, false), "CKA_SENSITIVE");
 	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_MODIFIABLE, true), "CKA_MODIFIABLE");
@@ -4884,7 +4895,6 @@ static bool isValidMilenageMasterKey(Token* token, OSObject* key)
 			return false;
 		label = plainLabel;
 	}
-	static const std::string expectedLabel = SOFTHSM_MILENAGE_MASTER_KEY_LABEL;
 	MILENAGE_KEY_CHECK(label.size() == expectedLabel.size() &&
 	    memcmp(label.const_byte_str(), expectedLabel.data(), expectedLabel.size()) == 0, "CKA_LABEL");
 
@@ -4896,11 +4906,25 @@ static bool isValidMilenageMasterKey(Token* token, OSObject* key)
 			return false;
 		id = plainId;
 	}
-	MILENAGE_KEY_CHECK(id.size() == 1 && id[0] == SOFTHSM_MILENAGE_MASTER_KEY_ID_BYTE, "CKA_ID");
+	MILENAGE_KEY_CHECK(id.size() == 1 && id[0] == expectedId, "CKA_ID");
 
 #undef MILENAGE_KEY_CHECK
 	return true;
 }
+
+static bool isValidMilenageMasterKey(Token* token, OSObject* key)
+{
+	static const std::string expectedLabel = SOFTHSM_MILENAGE_MASTER_KEY_LABEL;
+	return isValidMilenageKeyTemplate(token, key, expectedLabel, SOFTHSM_MILENAGE_MASTER_KEY_ID_BYTE);
+}
+
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+static bool isValidTransportKek(Token* token, OSObject* key)
+{
+	static const std::string expectedLabel = SOFTHSM_MILENAGE_TRANSPORT_KEK_LABEL;
+	return isValidMilenageKeyTemplate(token, key, expectedLabel, SOFTHSM_MILENAGE_TRANSPORT_KEK_ID_BYTE);
+}
+#endif
 
 // Fixed response sizes for the output-size-query calling convention
 // (pSignature == NULL_PTR): must be computable without unwrapping any
@@ -4920,10 +4944,17 @@ static CK_ULONG milenageResponseSize(CK_MECHANISM_TYPE mechanism)
 			return 12 + 1 * 6 + 6;
 #ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
 		case CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED:
+#endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+		case CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED:
+#endif
+#if defined(WITH_MILENAGE_PLAINTEXT_PROVISIONING) || defined(WITH_MILENAGE_TRANSPORT_IMPORT)
 		{
 			// AES-KWP output for a fixed 58-byte plaintext envelope:
 			// 8 + 8*ceil(58/8) = 8 + 64 = 72 bytes, wrapped_k and
-			// wrapped_opc, 2 TLVs.
+			// wrapped_opc, 2 TLVs. Same response shape for provision
+			// and transport import -- both end by wrapping under the
+			// Master Storage Key with the same fixed envelope.
 			const CK_ULONG wrappedLen = 8 + 8 * ((SOFTHSM_MILENAGE_ENVELOPE_PLAINTEXT_LEN + 7) / 8);
 			return 12 + 2 * 6 + 2 * wrappedLen;
 		}
@@ -4966,6 +4997,68 @@ CK_RV SoftHSM::MilenageSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMe
 
 	if (!isMechanismPermitted(key, pMechanism->mechanism))
 		return CKR_MECHANISM_INVALID;
+
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+	if (pMechanism->mechanism == CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED)
+	{
+		// hKey is the Transport KEK here, not the Master Storage Key.
+		if (!isValidTransportKek(token, key))
+			return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+		// The Master Storage Key handle is supplied via the mechanism
+		// parameter (CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS) --
+		// standard PKCS#11 C_SignInit has no other way to pass a
+		// second key to a mechanism. It is independently re-validated
+		// against the Master Storage Key template below, exactly like
+		// every other Milenage mechanism does for its key.
+		if (pMechanism->pParameter == NULL_PTR ||
+		    pMechanism->ulParameterLen != sizeof(CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS))
+			return CKR_MECHANISM_PARAM_INVALID;
+		CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS* params =
+			(CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS*)pMechanism->pParameter;
+
+		OSObject *masterKeyObj = (OSObject *)handleManager->getObject(params->masterKeyHandle);
+		if (masterKeyObj == NULL_PTR || !masterKeyObj->isValid())
+			return CKR_KEY_HANDLE_INVALID;
+
+		CK_BBOOL masterIsOnToken = masterKeyObj->getBooleanValue(CKA_TOKEN, false);
+		CK_BBOOL masterIsPrivate = masterKeyObj->getBooleanValue(CKA_PRIVATE, true);
+		CK_RV masterRv = haveRead(session->getState(), masterIsOnToken, masterIsPrivate);
+		if (masterRv != CKR_OK)
+			return masterRv;
+
+		if (!masterKeyObj->getBooleanValue(CKA_SIGN, false))
+			return CKR_KEY_FUNCTION_NOT_PERMITTED;
+		if (!isMechanismPermitted(masterKeyObj, pMechanism->mechanism))
+			return CKR_MECHANISM_INVALID;
+		if (!isValidMilenageMasterKey(token, masterKeyObj))
+			return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+		SymmetricKey rawTransportKey, rawMasterKey;
+		if (getSymmetricKey(&rawTransportKey, token, key) != CKR_OK ||
+		    getSymmetricKey(&rawMasterKey, token, masterKeyObj) != CKR_OK)
+			return CKR_GENERAL_ERROR;
+		if (rawTransportKey.getKeyBits().size() != SOFTHSM_MILENAGE_TRANSPORT_KEK_VALUE_LEN ||
+		    rawMasterKey.getKeyBits().size() != SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN)
+			return CKR_GENERAL_ERROR;
+
+		unsigned char transportKek[SOFTHSM_MILENAGE_TRANSPORT_KEK_VALUE_LEN];
+		unsigned char masterKey[SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN];
+		memcpy(transportKek, rawTransportKey.getKeyBits().const_byte_str(), sizeof(transportKek));
+		memcpy(masterKey, rawMasterKey.getKeyBits().const_byte_str(), sizeof(masterKey));
+
+		session->setOpType(SESSION_OP_MILENAGE);
+		session->setMilenageOp(pMechanism->mechanism, transportKek);
+		session->setMilenageSecondaryKey(masterKey);
+		session->setAllowMultiPartOp(false);
+		session->setAllowSinglePartOp(true);
+
+		memset(transportKek, 0, sizeof(transportKek));
+		memset(masterKey, 0, sizeof(masterKey));
+
+		return CKR_OK;
+	}
+#endif
 
 	if (!isValidMilenageMasterKey(token, key))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -5044,6 +5137,22 @@ CK_RV SoftHSM::MilenageSign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_UL
 		case CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED:
 			svcErr = milenage_service::provision(pData, ulDataLen, masterKey, response);
 			break;
+#endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+		case CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED:
+		{
+			// Here session's "primary" key is the Transport KEK and
+			// the "secondary" key is the Master Storage Key -- see
+			// MilenageSignInit's transport-import branch.
+			const unsigned char* secondaryKey = session->getMilenageSecondaryKey();
+			if (secondaryKey == NULL)
+			{
+				session->resetOp();
+				return CKR_OPERATION_NOT_INITIALIZED;
+			}
+			svcErr = milenage_service::importTransportWrapped(pData, ulDataLen, masterKey, secondaryKey, response);
+			break;
+		}
 #endif
 		default:
 			session->resetOp();

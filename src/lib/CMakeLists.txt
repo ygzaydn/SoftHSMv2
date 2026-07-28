@@ -36,6 +36,7 @@ if(WITH_MILENAGE)
                         milenage/Milenage.cpp
                         milenage/FiveGAka.cpp
                         milenage/CredentialEnvelope.cpp
+                        milenage/TransportEnvelope.cpp
                         milenage/WireCodec.cpp
                         milenage/MilenageService.cpp
                         )

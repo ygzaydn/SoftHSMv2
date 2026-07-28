@@ -7,6 +7,7 @@
 #include "Milenage.h"
 #include "FiveGAka.h"
 #include "CredentialEnvelope.h"
+#include "TransportEnvelope.h"
 #include "CryptoBackend.h"
 #include "softhsm_milenage.h"
 
@@ -276,6 +277,65 @@ Error provision(const uint8_t *request, size_t requestLen, const uint8_t masterK
 
     if (!plainK.empty()) std::memset(plainK.data(), 0, plainK.size());
     if (!plainOpc.empty()) std::memset(plainOpc.data(), 0, plainOpc.size());
+    return result;
+}
+
+Error importTransportWrapped(const uint8_t *request, size_t requestLen, const uint8_t transportKek[32],
+                              const uint8_t masterKey[32], std::vector<uint8_t> &response)
+{
+    milenage_wire::Request req;
+    if (milenage_wire::parseRequest(request, requestLen, req) != milenage_wire::Error::OK) {
+        return Error::BAD_REQUEST;
+    }
+    if (req.operation != SOFTHSM_MILENAGE_OP_IMPORT_TRANSPORT) {
+        return Error::BAD_REQUEST;
+    }
+
+    std::vector<uint8_t> supiBytes, transportK, transportOpc;
+    if (!getField(req, SOFTHSM_MILENAGE_TAG_SUPI, supiBytes) ||
+        supiBytes.size() > SOFTHSM_MILENAGE_MAX_SUPI_LEN ||
+        !getField(req, SOFTHSM_MILENAGE_TAG_TRANSPORT_WRAPPED_K, transportK) ||
+        !getField(req, SOFTHSM_MILENAGE_TAG_TRANSPORT_WRAPPED_OPC, transportOpc)) {
+        return Error::BAD_REQUEST;
+    }
+
+    std::string supi = bytesToString(supiBytes);
+
+    uint8_t plainK[16], plainOpc[16];
+    milenage_transport::Error txErr;
+    txErr = milenage_transport::unwrapPackage(supi, milenage_transport::SecretType::K, transportK,
+                                               transportKek, plainK);
+    if (txErr != milenage_transport::Error::OK) {
+        return Error::CREDENTIAL_INVALID;
+    }
+    txErr = milenage_transport::unwrapPackage(supi, milenage_transport::SecretType::OPC, transportOpc,
+                                               transportKek, plainOpc);
+    if (txErr != milenage_transport::Error::OK) {
+        std::memset(plainK, 0, sizeof(plainK));
+        return Error::CREDENTIAL_INVALID;
+    }
+
+    std::vector<uint8_t> wrappedK, wrappedOpc;
+    Error result = Error::OK;
+    if (milenage_envelope::wrapSecret(supi, milenage_envelope::SecretType::K, plainK,
+                                       masterKey, wrappedK) != milenage_envelope::Error::OK) {
+        result = Error::BAD_REQUEST;
+    } else if (milenage_envelope::wrapSecret(supi, milenage_envelope::SecretType::OPC, plainOpc,
+                                              masterKey, wrappedOpc) != milenage_envelope::Error::OK) {
+        result = Error::BAD_REQUEST;
+    } else {
+        std::vector<std::pair<uint16_t, std::vector<uint8_t>>> fields = {
+            {SOFTHSM_MILENAGE_TAG_OUT_WRAPPED_K, wrappedK},
+            {SOFTHSM_MILENAGE_TAG_OUT_WRAPPED_OPC, wrappedOpc},
+        };
+        result = (milenage_wire::buildResponse(SOFTHSM_MILENAGE_OP_IMPORT_TRANSPORT, fields, response) ==
+                  milenage_wire::Error::OK)
+                     ? Error::OK
+                     : Error::BAD_REQUEST;
+    }
+
+    std::memset(plainK, 0, sizeof(plainK));
+    std::memset(plainOpc, 0, sizeof(plainOpc));
     return result;
 }
 

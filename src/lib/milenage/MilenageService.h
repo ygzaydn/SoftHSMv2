@@ -3,20 +3,21 @@
  * wire-format request, validate fields, unwrap credentials, run
  * Milenage / 5G-AKA, build the wire-format response.
  *
- * This is the logic that C_SignInit/C_Sign would invoke for
- * CKM_SOFTHSM_5G_HE_AV_WRAPPED / CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED /
- * CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED once wired into
- * src/lib/SoftHSM.cpp's mechanism dispatch and session/key-object
- * model. That wiring does not exist yet -- see
- * doc/MILENAGE-5G-AKA-DESIGN.md section 17. This class takes the
- * Master Storage Key as a raw 32-byte buffer (see the INTERIM note in
- * CredentialEnvelope.h); it must be adapted to go through SoftHSM's
- * key-object/crypto layer instead before it is ever given a real
- * token key's value.
+ * This is the logic src/lib/SoftHSM.cpp's C_SignInit/C_Sign dispatch
+ * calls for CKM_SOFTHSM_5G_HE_AV_WRAPPED / CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED
+ * / CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED / CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED.
+ * This module still takes the Master Storage Key (and, for transport
+ * import, the Transport KEK) as raw 32-byte buffers rather than
+ * PKCS#11 key handles -- see the INTERIM note in CredentialEnvelope.h;
+ * SoftHSM.cpp obtains those raw bytes via the same
+ * SoftHSM::getSymmetricKey() path used for every other key type in
+ * this codebase, so the values never leave the crypto layer through
+ * any *new* extraction path even though this module's own signature
+ * looks like a raw-buffer API.
  *
- * RAND generation uses OpenSSL RAND_bytes() directly here for the same
- * "no Botan available in this dev environment" reason documented for
- * Milenage.cpp / FiveGAka.cpp.
+ * All cryptography goes through src/lib/milenage/CryptoBackend.cpp
+ * (CryptoFactory-backed, backend-independent) -- see design doc
+ * section 17.
  */
 
 #ifndef SOFTHSM_MILENAGE_SERVICE_H
@@ -70,6 +71,19 @@ Error resync(const uint8_t *request, size_t requestLen,
 Error provision(const uint8_t *request, size_t requestLen,
                  const uint8_t masterKey[32],
                  std::vector<uint8_t> &response);
+
+/* Handles CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED (design doc
+ * section 6 / task item 6). Only reachable when built with
+ * WITH_MILENAGE_TRANSPORT_IMPORT; this module does not itself enforce
+ * that gate. Unwraps K and OPc from the transport-wrapped package
+ * under transportKek, validates package metadata and subscriber
+ * binding, re-wraps both secrets under masterKey exactly like
+ * provision() does, and returns only wrapped_k/wrapped_opc -- never
+ * plaintext K/OPc. */
+Error importTransportWrapped(const uint8_t *request, size_t requestLen,
+                              const uint8_t transportKek[32],
+                              const uint8_t masterKey[32],
+                              std::vector<uint8_t> &response);
 
 } // namespace milenage_service
 

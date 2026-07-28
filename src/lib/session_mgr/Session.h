@@ -134,8 +134,14 @@ public:
 	// C_SignInit..C_Sign operation; wiped by resetOp(). See
 	// doc/MILENAGE-5G-AKA-DESIGN.md.
 	void setMilenageOp(CK_MECHANISM_TYPE inMechanism, const unsigned char inMasterKey[32]);
+	// Transport import needs a second key (the Transport KEK, held in
+	// the "primary" slot passed to setMilenageOp) alongside the Master
+	// Storage Key (the "secondary" slot here) -- see
+	// CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS in softhsm_milenage.h.
+	void setMilenageSecondaryKey(const unsigned char inKey[32]);
 	CK_MECHANISM_TYPE getMilenageMechanism();
 	const unsigned char* getMilenageMasterKey();
+	const unsigned char* getMilenageSecondaryKey();
 
 private:
 	// Constructor
@@ -189,6 +195,8 @@ private:
 	CK_MECHANISM_TYPE milenageMechanism;
 	unsigned char milenageMasterKey[32];
 	bool milenageKeyValid;
+	unsigned char milenageSecondaryKey[32];
+	bool milenageSecondaryKeyValid;
 };
 
 #endif // !_SOFTHSM_V2_SESSION_H

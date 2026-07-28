@@ -54,3 +54,17 @@ add_test(NAME milenage-pkcs11-restart-test
                  $<TARGET_FILE:softhsm2-util>
                  $<TARGET_FILE:milenage-pkcs11-restart-test>
          )
+
+if(WITH_MILENAGE_TRANSPORT_IMPORT)
+    add_executable(milenage-pkcs11-transport-import-test pkcs11_transport_import_test.cpp)
+    target_compile_options(milenage-pkcs11-transport-import-test PRIVATE ${COMPILE_OPTIONS})
+    target_link_libraries(milenage-pkcs11-transport-import-test ${CMAKE_DL_LIBS} ${CRYPTO_LIBS})
+
+    add_test(NAME milenage-pkcs11-transport-import-test
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_pkcs11_ctest.sh
+                     e2e
+                     $<TARGET_FILE:softhsm2>
+                     $<TARGET_FILE:softhsm2-util>
+                     $<TARGET_FILE:milenage-pkcs11-transport-import-test>
+             )
+endif()

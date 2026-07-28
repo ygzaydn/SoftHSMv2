@@ -690,3 +690,194 @@ programmer-controlled field set, but not a general JSON encoder --
 acceptable here only because none of the interpolated values can
 contain characters requiring JSON escaping other than the label
 string, which does go through `jsonEscape()`).
+
+## 18. Second round of hardening (post-milestone)
+
+Following the initial functional milestone (sections above, commits
+1-6 in `git log`), a second round addressed authoritative test
+vectors, backend independence, test integration, the test-RAND gap,
+and the Transport KEK. This section is the status record for that
+round; treat it as continuing/superseding section 17 rather than
+duplicating it.
+
+### Commit 7 (refactor: remove direct OpenSSL dependency)
+See the commit message for full detail. Summary: `CryptoBackend.{h,cpp}`
+is now the only file in `src/lib/milenage` that touches
+`CryptoFactory`; `Milenage.cpp`/`FiveGAka.cpp`/`CredentialEnvelope.cpp`/
+`WireCodec.cpp`/`MilenageService.cpp` have zero OpenSSL/Botan-specific
+code (grep-verified). Verified for the OpenSSL backend by a full
+rebuild plus the existing 30-check PKCS#11 E2E test and the restart
+test, both still passing. **Not verified for Botan**: this sandboxed
+environment has no root access to install `libbotan-2-dev`/
+`libbotan-3-dev`, so `WITH_CRYPTO_BACKEND=botan` could not be
+configured or compiled here. Confidence rests on `CryptoBackend.cpp`
+using only the same backend-selectable abstraction headers
+`SoftHSM.cpp` itself already uses across both backends — inspection,
+not execution.
+
+### Commit 8 (test: authoritative KAT tests + CTest integration)
+`src/lib/milenage/test/milenage_kat_test.cpp` adds full 3GPP TS
+35.207 Test Set 1 and Test Set 2 (all 8 outputs each: OPc, MAC-A,
+MAC-S, RES, CK, IK, AK, AK*), both official RFC 5649 section 6
+examples (fetched directly from rfc-editor.org), and an explicitly-
+labeled independent cross-check (not an official KAT) for XRES*/KAUSF
+against a second, separately-written HMAC-SHA-256 implementation. See
+the file's own header comment for exact source citations, including
+the caveat that the primary ETSI PDF for TS 35.207 returned HTTP 403
+in this session and the Milenage vectors were instead sourced from the
+CryptoMobile open-source reference implementation, corroborated by an
+exact match on 4 of 8 Test Set 1 fields against values independently
+recalled in an earlier session. All 28 checks pass (verified: built
+and run).
+
+Tests are integrated with `ctest` (not CppUnit — this environment has
+no `libcppunit-dev` and no root to install it, so a CppUnit suite
+could not be built here; the task explicitly allows "CppUnit and/or
+CTest"). `src/lib/milenage/test/CMakeLists.txt` builds and registers
+`milenage-kat-test`, `milenage-service-test`,
+`milenage-pkcs11-e2e-test`, `milenage-pkcs11-restart-test`, and (when
+`WITH_MILENAGE_TRANSPORT_IMPORT` is also on) `milenage-pkcs11-transport-import-test`.
+Gated only on `WITH_MILENAGE`, independent of `BUILD_TESTS`.
+
+### Commit 9 (feat: connect WITH_MILENAGE_TEST_RAND to the wire protocol)
+`MilenageService::generate5gHeAv` now reads an optional
+`SOFTHSM_MILENAGE_TAG_RAND` wire field; used as RAND only when built
+with `WITH_MILENAGE_TEST_RAND`, and a hard `Error::BAD_REQUEST` (never
+silently ignored) when that flag is off. Verified by building both
+configurations and running the new `milenage-service-test` checks
+against each (flag on: wire RAND accepted and deterministic; flag
+off: wire RAND rejected). Chose "preferred" option from the task's
+item 5, not flag removal.
+
+### Commit 10 (feat: Transport KEK + transport-wrapped import)
+Implements task item 6 in full:
+- `TransportEnvelope.{h,cpp}`: a distinct package format (magic
+  `"S5GT"`, 91-byte plaintext) binding canonical SUPI, secret type,
+  package version, a transport-key-version marker, an optional
+  0-32-byte transaction ID, and the 16-byte secret, AES-KWP-wrapped
+  under the Transport KEK. Deliberately a different format/magic from
+  the credential envelope (`CredentialEnvelope.h`, magic `"S5GC"`)
+  that's what actually gets stored in the UDM database — the
+  transport package is only ever the authority-to-SoftHSM wire, never
+  persisted.
+- `MilenageService::importTransportWrapped`: unwraps K and OPc from
+  the transport package under the Transport KEK, validates metadata
+  and subscriber binding, re-wraps both under the Master Storage Key
+  exactly like `provision()` does, and returns only
+  `wrapped_k`/`wrapped_opc` — never plaintext.
+- PKCS#11 wiring (`SoftHSM.cpp`, gated by new `WITH_MILENAGE_TRANSPORT_IMPORT`
+  CMake option, requires `WITH_MILENAGE`): the Transport KEK template
+  is validated by a newly-generalized `isValidMilenageKeyTemplate()`
+  (same shape as the Master Storage Key check, parameterized by
+  label/id) with its own label (`open5gs-milenage-transport-kek`) and
+  id (`0x02`), cryptographically and by-template distinct from the
+  Master Storage Key. Because standard PKCS#11 `C_SignInit` takes only
+  one key handle but this operation needs two keys (Transport KEK to
+  unwrap, Master Storage Key to re-wrap), the Master Storage Key
+  handle is passed via a new mechanism parameter,
+  `CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS` (`softhsm_milenage.h`),
+  and is independently re-validated against the Master Storage Key
+  template server-side rather than trusted from the caller. `Session`
+  gained a second 32-byte key slot (`milenageSecondaryKey`) alongside
+  the existing one, both wiped unconditionally by `resetOp()`.
+
+**Actual test results**: `src/lib/milenage/test/pkcs11_transport_import_test.cpp`
+(26/26 checks, built and run against a from-scratch
+`WITH_MILENAGE_TRANSPORT_IMPORT=ON` build) drives the real PKCS#11 API
+end to end: generates a real Master Storage Key and a real Transport
+KEK via `C_GenerateKey` with their full templates; confirms the
+Transport KEK is rejected for ordinary `CKM_AES_ECB` and
+`C_GetAttributeValue`; confirms the Master Storage Key object is
+rejected as the transport-import `hKey` (wrong template); imports a
+known-value Transport KEK via `C_CreateObject` so the test (playing
+the role of the external "secure provisioning authority") can build a
+transport package with its own independent AES-KWP call directly
+against OpenSSL EVP (sharing no code with `TransportEnvelope.cpp`);
+runs a full `C_SignInit`/`C_Sign` transport-import round trip whose
+output wraps successfully feeds a real `CKM_SOFTHSM_5G_HE_AV_WRAPPED`
+call; and separately verifies all of the required negative paths from
+task item 9 for this mechanism: wrong Transport KEK rejected, modified
+transport ciphertext rejected, wrong SUPI binding rejected, swapped
+K/OPc transport packages rejected. Full `ctest` suite (5/5) passes
+with this flag on; the transport-import test target is entirely absent
+when the flag is off (confirmed by rebuilding without it), and the
+default build (all flags off) is unaffected (confirmed by a from-
+scratch rebuild).
+
+### Status against the second-round completion criteria
+1. Milenage outputs vs. authoritative vectors: **done** (2 full TS
+   35.207 test sets, 16 checks).
+2. RFC 5649 vs. official vectors: **done** (both RFC examples, wrap
+   and unwrap).
+3. XRES*/KAUSF vs. authoritative or independently-verified values:
+   **partial** — independent cross-check done (2 implementations
+   agree); no official 3GPP-published numeric KAT was found.
+4. No direct OpenSSL dependency in Milenage: **done for the code**,
+   **not executed against Botan** (environment constraint).
+5. Tests integrated into normal project test suite: **done via
+   CTest**; **not done via CppUnit** (environment constraint, no root
+   to install `libcppunit-dev`).
+6. Both CMake and Autotools builds work: **CMake only** — Autotools
+   (task item 4) was not reached in this round; `configure.ac`/
+   `Makefile.am` still have no `WITH_MILENAGE*` support.
+7. test-RAND flag fully implemented or removed: **done** (implemented).
+8. Secure transport-wrapped provisioning implemented: **done**
+   (mechanism, Transport KEK, 26-check E2E test including the specific
+   negative paths task item 9 calls out for it).
+9. Plaintext provisioning test-only and disabled by default: **already
+   true from the first round** (`WITH_MILENAGE_PLAINTEXT_PROVISIONING`
+   default OFF) — task item 7's CLI-side `--allow-plaintext-test-provisioning`
+   flag and making transport-wrapped import the CLI's default path
+   were **not reached** in this round.
+10. All tests and sanitizers executed: tests yes (CTest suites above,
+    all passing); **AddressSanitizer/UndefinedBehaviorSanitizer were
+    not run** in this round (task item 9's sanitizer requirement) —
+    not reached.
+11. Design documentation updated: this section.
+12. No Open5GS modifications: confirmed — `git status`/`git diff`
+    touch only files under this repository, nothing Open5GS-related
+    exists in this tree.
+
+### Not reached this round, with reasons
+- **Autotools build support** (task item 4): not started. Reason:
+  time — CMake support alone (5 build-flag combinations, the shared
+  library, the static library, 3 new test binaries, one new CLI
+  binary) was already substantial; mirroring it faithfully in
+  `configure.ac`/`Makefile.am`, including feature-flag `AC_ARG_ENABLE`
+  wiring, conditional source lists, and a configuration summary,
+  is comparable in size to everything else in this round combined and
+  was not attempted rather than attempted partially/untested.
+- **CLI plaintext-provisioning restriction** (task item 7): not
+  started. The CLI's `provision` command still accepts plaintext K/OPc
+  via stdin/`--input-fd` whenever the binary was built at all (i.e.
+  whenever `WITH_MILENAGE` is on), rather than requiring both a
+  separate build flag and an explicit `--allow-plaintext-test-provisioning`
+  runtime flag, and the CLI does not yet default to
+  `import-transport-wrapped`. The server-side gate
+  (`WITH_MILENAGE_PLAINTEXT_PROVISIONING`) is real and independently
+  enforced, but the CLI-side hardening described in task item 7 is
+  not.
+- **CKM_SOFTHSM_MILENAGE_RAW_TEST** (task item 8): still unimplemented
+  (mechanism ID reserved only). Per the task's own instruction ("do
+  not delay the required official-vector tests merely because this
+  mechanism is absent... direct internal unit tests are acceptable"),
+  this was deliberately skipped in favor of the direct-call KAT tests,
+  which already exercise the Milenage core without needing a PKCS#11
+  round trip.
+- **Sanitizer runs** (task item 9's last requirement): not done. The
+  test binaries that exist (`milenage-kat-test`, `milenage-service-test`,
+  the PKCS#11 E2E/restart/transport-import tests) are all real,
+  already-passing executables that a follow-up session can rebuild
+  with `-fsanitize=address,undefined` and rerun without any code
+  changes — this is pure remaining-time, not a blocker.
+- **Additional negative/secret-exposure tests beyond what commits 8-10
+  already added** (task item 9's checklist items not covered by the
+  transport-import test's negative paths): "failed unwraps do not
+  reveal which field failed" is true by construction (one generic
+  error, see `CredentialEnvelope.cpp`/`TransportEnvelope.cpp`) but has
+  no dedicated test beyond the existing tamper/wrong-key/wrong-SUPI
+  checks; "plaintext K/OPc not printed by CLI tools" and "not stored
+  as token objects" and "no secret values in normal logs" are true by
+  code inspection (the CLI never has a code path that prints them; the
+  provisioning flow never creates a plaintext PKCS#11 object) but were
+  not asserted by an automated test that greps binary/log output.
