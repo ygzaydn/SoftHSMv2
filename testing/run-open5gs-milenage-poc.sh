@@ -92,7 +92,7 @@ sys.stdout.buffer.write(k + opc)
 
 echo "-- provision (PoC plaintext mode, public test-vector data) --"
 "$CLI" provision --module "$MODULE" --token-label milenage-poc --pin-file "$PIN_FILE" \
-	--supi "$SUPI" --output "$SUBSCRIBER_JSON" < "$CRED_FILE"
+	--supi "$SUPI" --output "$SUBSCRIBER_JSON" --allow-plaintext-test-provisioning < "$CRED_FILE"
 echo "PASS: provisioning process wrote a UDM-ready JSON fragment"
 
 WRAPPED_K=$(python3 -c "import json; print(json.load(open('$SUBSCRIBER_JSON'))['wrapped_k'])")

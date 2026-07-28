@@ -926,3 +926,42 @@ Not run under sanitizers in this session: the `softhsm2-milenage` CLI
 itself (only the library and the internal test binaries were built
 with sanitizer flags in this pass) and `testing/run-open5gs-milenage-poc.sh`
 (which builds its own separate, non-instrumented build directory).
+
+## 20. CLI plaintext-provisioning restriction (task item 7)
+
+`softhsm2-milenage`'s `provision` command now requires three
+independent, non-overlapping gates, none sufficient alone:
+
+1. **Build-time**: `cmdProvision()`'s entire body is compiled only
+   under `#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING` (the CLI reads
+   this from the same generated `config.h` the server-side gate
+   uses -- one CMake option controls both). Without it, `provision`
+   exits with "this build does not include plaintext provisioning".
+2. **Runtime**: even in a build that has the command compiled in, it
+   refuses to run without an explicit `--allow-plaintext-test-provisioning`
+   flag.
+3. **Server-side** (already true from an earlier commit):
+   `CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED` itself is not a registered
+   mechanism unless the token's `libsofthsm2.so` was independently
+   built with the same flag.
+
+When used, it prints an explicit stderr warning before touching any
+secret material: "plaintext credential provisioning is a
+development/PoC-only mode... not appropriate for production use...
+prefer 'import-transport-wrapped'."
+
+**Actual test results**: rebuilt and ran three configurations from
+scratch. (1) `WITH_MILENAGE_PLAINTEXT_PROVISIONING=ON` build, CLI
+without the runtime flag: refused with the expected message, exit 1.
+(2) Same build, CLI with the runtime flag: succeeded, warning printed
+to stderr, output JSON correct. (3) `WITH_MILENAGE=ON` build with
+`WITH_MILENAGE_PLAINTEXT_PROVISIONING` left off: CLI refused with the
+"this build does not include..." message even with the runtime flag
+passed, exit 1. `testing/run-open5gs-milenage-poc.sh` updated to pass
+the new required flag and re-run end to end (still passes in full).
+
+**Still not done from task item 7**: the CLI does not yet make
+`import-transport-wrapped` its literal default subcommand behavior (it
+is simply the recommended alternative in help text and warnings); no
+change was needed to `import-transport-wrapped` itself since it never
+accepted plaintext input in the first place.

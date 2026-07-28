@@ -54,6 +54,7 @@
 #ifndef NULL_PTR
 #define NULL_PTR 0
 #endif
+#include "config.h"
 #include "pkcs11.h"
 #include "softhsm_milenage.h"
 
@@ -465,9 +466,23 @@ std::vector<uint8_t> readAllFd(int fd)
 // credential input from an already-open file descriptor (--input-fd)
 // or, if none was given, from stdin. Never argv, never an environment
 // variable -- see design doc section 4 / 8.
+//
+// This whole command is compiled only when the CLI itself is built
+// with WITH_MILENAGE_PLAINTEXT_PROVISIONING (propagated from the
+// CMake option of the same name onto this target -- see
+// src/bin/milenage/CMakeLists.txt), on top of also requiring the
+// explicit runtime --allow-plaintext-test-provisioning flag (checked
+// in main()) and the server independently refusing
+// CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED unless it was built the same
+// way. Three independent gates, none of which is sufficient alone,
+// per task item 7. The production path is `import-transport-wrapped`.
+#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
 void cmdProvision(Pkcs11Context &ctx, const CommonOpts &opts, const std::string &supi,
                    int inputFd, const std::string &outputPath, bool force)
 {
+    std::cerr << "WARNING: plaintext credential provisioning is a development/PoC-only mode.\n"
+                 "WARNING: it is not appropriate for production use. Prefer 'import-transport-wrapped'.\n";
+
     int fd = (inputFd >= 0) ? inputFd : STDIN_FILENO;
     std::vector<uint8_t> input = readAllFd(fd);
     // Best-effort: attempt to keep the plaintext credential buffer out
@@ -520,6 +535,7 @@ void cmdProvision(Pkcs11Context &ctx, const CommonOpts &opts, const std::string 
         writeOutputFile(outputPath, json.str(), force);
     }
 }
+#endif // WITH_MILENAGE_PLAINTEXT_PROVISIONING
 
 void cmdGenerateAv(Pkcs11Context &ctx, const CommonOpts &opts, const std::string &supi,
                     const std::string &wrappedKB64, const std::string &wrappedOpcB64,
@@ -598,8 +614,10 @@ void printUsage()
         "  --module <path> --token-label <label> --token-serial <serial>\n"
         "  --slot-id <id> --pin-file <path> --pin-fd <fd>\n"
         "  --master-key-label <label> --master-key-id <hex-byte>\n"
-        "provision options:\n"
+        "provision options (development/PoC only -- requires a build with\n"
+        "  WITH_MILENAGE_PLAINTEXT_PROVISIONING; prefer import-transport-wrapped):\n"
         "  --supi <imsi-...> --input-fd <fd> --output <path> --force\n"
+        "  --allow-plaintext-test-provisioning   (required, no default)\n"
         "generate-5g-av / resync options:\n"
         "  --supi <imsi-...> --wrapped-k <base64> --wrapped-opc <base64>\n"
         "  --sqn <hex12> --amf <hex4> --snn <string>   (generate-5g-av)\n"
@@ -626,6 +644,7 @@ int main(int argc, char **argv)
     std::string supi, wrappedK, wrappedOpc, sqnHex, amfHex, snn, randHex, autsHex, outputPath;
     int inputFd = -1;
     bool force = false;
+    bool allowPlaintextTestProvisioning = false;
 
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
@@ -648,6 +667,7 @@ int main(int argc, char **argv)
         else if (a == "--input-fd") inputFd = (int)strtol(requireArg(argc, argv, i).c_str(), nullptr, 10);
         else if (a == "--output") outputPath = requireArg(argc, argv, i);
         else if (a == "--force") force = true;
+        else if (a == "--allow-plaintext-test-provisioning") allowPlaintextTestProvisioning = true;
         else if (a == "--pin" || a == "--k" || a == "--opc") die("option " + a + " is refused for security reasons (see design doc section 4/8)");
         else die("unknown option: " + a);
     }
@@ -660,8 +680,17 @@ int main(int argc, char **argv)
     if (command == "create-master-key") {
         cmdCreateMasterKey(ctx, opts);
     } else if (command == "provision") {
+#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
         if (supi.empty()) die("--supi is required");
+        if (!allowPlaintextTestProvisioning)
+            die("plaintext provisioning requires the explicit --allow-plaintext-test-provisioning flag; "
+                "prefer 'import-transport-wrapped' for production use");
         cmdProvision(ctx, opts, supi, inputFd, outputPath, force);
+#else
+        (void)allowPlaintextTestProvisioning;
+        die("this build does not include plaintext provisioning (WITH_MILENAGE_PLAINTEXT_PROVISIONING was not "
+            "enabled); use 'import-transport-wrapped' instead");
+#endif
     } else if (command == "generate-5g-av") {
         if (supi.empty() || wrappedK.empty() || wrappedOpc.empty() || sqnHex.empty() || amfHex.empty() || snn.empty())
             die("--supi, --wrapped-k, --wrapped-opc, --sqn, --amf, --snn are all required");
