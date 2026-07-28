@@ -1,17 +1,17 @@
 /*
  * 5G-AKA KDFs (3GPP TS 33.501 Annex A, built on the generic KDF of
  * TS 33.220 Annex B: HMAC-SHA-256 over S = FC || P0 || L0 || P1 || L1
- * || ...). Implemented independently using OpenSSL EVP HMAC. Not yet
- * wired into SoftHSM's CryptoFactory abstraction (see design doc
- * section 17).
+ * || ...). HMAC-SHA-256 is provided by CryptoBackend.cpp, the only
+ * file in this directory that talks to SoftHSM's CryptoFactory --
+ * this file has no dependency on which crypto backend SoftHSM was
+ * built with. See doc/MILENAGE-5G-AKA-DESIGN.md section 17.
  */
 
 #include "FiveGAka.h"
+#include "CryptoBackend.h"
 
 #include <cstring>
 #include <vector>
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
 
 namespace fiveg_aka {
 
@@ -31,10 +31,7 @@ void appendParam(std::vector<uint8_t> &s, const uint8_t *p, size_t len)
 bool genericKdf(const uint8_t *key, size_t keyLen, const std::vector<uint8_t> &s,
                  uint8_t out32[32])
 {
-    unsigned int outLen = 0;
-    uint8_t *ret = HMAC(EVP_sha256(), key, static_cast<int>(keyLen), s.data(),
-                         s.size(), out32, &outLen);
-    return ret != nullptr && outLen == 32;
+    return milenage_crypto::hmacSha256(key, keyLen, s.data(), s.size(), out32);
 }
 
 } // namespace

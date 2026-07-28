@@ -1,17 +1,18 @@
 /*
  * Wrapped credential envelope (design doc section 9): builds/parses
  * the versioned plaintext envelope and wraps it with AES-KWP
- * (RFC 5649 / NIST SP 800-38F) via OpenSSL's AES-256-WRAP-PAD cipher.
- * See CredentialEnvelope.h for the INTERIM note on the raw-buffer
- * masterKey parameter.
+ * (RFC 5649 / NIST SP 800-38F) via CryptoBackend.cpp, the only file
+ * in this directory that talks to SoftHSM's CryptoFactory -- this
+ * file has no dependency on which crypto backend SoftHSM was built
+ * with. See CredentialEnvelope.h for the INTERIM note on the
+ * raw-buffer masterKey parameter, and design doc section 17.
  */
 
 #include "CredentialEnvelope.h"
+#include "CryptoBackend.h"
 #include "../milenage/softhsm_milenage.h"
 
 #include <cstring>
-#include <openssl/evp.h>
-#include <openssl/sha.h>
 
 namespace milenage_envelope {
 
@@ -31,62 +32,19 @@ bool constantTimeEqual(const uint8_t *a, const uint8_t *b, size_t len)
 void computeSubscriberBinding(const std::string &canonicalSupi, uint8_t out[32])
 {
     std::string input = std::string(SOFTHSM_MILENAGE_SUBSCRIBER_BINDING_CONTEXT) + canonicalSupi;
-    SHA256(reinterpret_cast<const unsigned char *>(input.data()), input.size(), out);
+    milenage_crypto::sha256(reinterpret_cast<const uint8_t *>(input.data()), input.size(), out);
 }
 
-/* AES-KWP wrap: plaintext may be any length >= 1; output is
- * ((len + 7) / 8 + 1) * 8 bytes, i.e. 8 bytes longer than the next
- * 8-byte-aligned plaintext length. Returns false on any OpenSSL error. */
 bool aesKwpWrap(const uint8_t key[MASTER_KEY_LEN], const uint8_t *plaintext, size_t ptLen,
                  std::vector<uint8_t> &out)
 {
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (ctx == nullptr) {
-        return false;
-    }
-    bool ok = false;
-    out.assign(ptLen + 16, 0); /* generous upper bound */
-    int outLen1 = 0, outLen2 = 0;
-
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_wrap_pad(), nullptr, key, nullptr) == 1) {
-        EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
-        if (EVP_EncryptUpdate(ctx, out.data(), &outLen1, plaintext, static_cast<int>(ptLen)) == 1 &&
-            EVP_EncryptFinal_ex(ctx, out.data() + outLen1, &outLen2) == 1) {
-            out.resize(outLen1 + outLen2);
-            ok = true;
-        }
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    if (!ok) {
-        out.clear();
-    }
-    return ok;
+    return milenage_crypto::aesKwpWrap(key, MASTER_KEY_LEN, plaintext, ptLen, out);
 }
 
 bool aesKwpUnwrap(const uint8_t key[MASTER_KEY_LEN], const uint8_t *wrapped, size_t wrappedLen,
                    std::vector<uint8_t> &out)
 {
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (ctx == nullptr) {
-        return false;
-    }
-    bool ok = false;
-    out.assign(wrappedLen, 0);
-    int outLen1 = 0, outLen2 = 0;
-
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_wrap_pad(), nullptr, key, nullptr) == 1) {
-        EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
-        if (EVP_DecryptUpdate(ctx, out.data(), &outLen1, wrapped, static_cast<int>(wrappedLen)) == 1 &&
-            EVP_DecryptFinal_ex(ctx, out.data() + outLen1, &outLen2) == 1) {
-            out.resize(outLen1 + outLen2);
-            ok = true;
-        }
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    if (!ok) {
-        out.clear();
-    }
-    return ok;
+    return milenage_crypto::aesKwpUnwrap(key, MASTER_KEY_LEN, wrapped, wrappedLen, out);
 }
 
 } // namespace

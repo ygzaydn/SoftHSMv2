@@ -1,17 +1,17 @@
 /*
  * Milenage algorithm primitives (3GPP TS 35.206 Annex 3 reference
- * algorithm structure). Implemented independently from the 3GPP
- * pseudocode/sample C, using OpenSSL EVP for the single AES-128 block
- * primitive E_K(). Not yet wired into SoftHSM's CryptoFactory
- * abstraction (see doc/MILENAGE-5G-AKA-DESIGN.md section 17) — this
- * uses OpenSSL directly so it can be built/tested standalone in an
- * environment without the Botan backend available.
+ * algorithm structure), implemented independently from the 3GPP
+ * pseudocode/sample C. The single AES-128 block primitive E_K() is
+ * provided by CryptoBackend.cpp, which is the only file in this
+ * directory that talks to SoftHSM's CryptoFactory -- this file has no
+ * dependency on which crypto backend (OpenSSL/Botan) SoftHSM was
+ * built with. See doc/MILENAGE-5G-AKA-DESIGN.md section 17.
  */
 
 #include "Milenage.h"
+#include "CryptoBackend.h"
 
 #include <cstring>
-#include <openssl/evp.h>
 
 namespace milenage {
 
@@ -20,24 +20,7 @@ namespace {
 /* Single AES-128 ECB block encryption: out = E_K(in), 16 bytes. */
 bool aes128EncryptBlock(const uint8_t key[K_LEN], const uint8_t in[16], uint8_t out[16])
 {
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (ctx == nullptr) {
-        return false;
-    }
-    bool ok = false;
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), nullptr, key, nullptr) == 1) {
-        EVP_CIPHER_CTX_set_padding(ctx, 0);
-        int outLen1 = 0, outLen2 = 0;
-        uint8_t buf[32];
-        if (EVP_EncryptUpdate(ctx, buf, &outLen1, in, 16) == 1 &&
-            EVP_EncryptFinal_ex(ctx, buf + outLen1, &outLen2) == 1 &&
-            (outLen1 + outLen2) == 16) {
-            std::memcpy(out, buf, 16);
-            ok = true;
-        }
-    }
-    EVP_CIPHER_CTX_free(ctx);
-    return ok;
+    return milenage_crypto::aes128EncryptBlock(key, in, out);
 }
 
 void xorBlock16(const uint8_t a[16], const uint8_t b[16], uint8_t out[16])

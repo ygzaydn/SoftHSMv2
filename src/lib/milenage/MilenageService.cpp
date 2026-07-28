@@ -1,12 +1,12 @@
 #include "MilenageService.h"
 
 #include <cstring>
-#include <openssl/rand.h>
 
 #include "WireCodec.h"
 #include "Milenage.h"
 #include "FiveGAka.h"
 #include "CredentialEnvelope.h"
+#include "CryptoBackend.h"
 #include "softhsm_milenage.h"
 
 namespace milenage_service {
@@ -85,7 +85,7 @@ Error generate5gHeAv(const uint8_t *request, size_t requestLen, const uint8_t ma
     uint8_t rand16[16];
     if (testRand != nullptr) {
         std::memcpy(rand16, testRand, 16);
-    } else if (RAND_bytes(rand16, 16) != 1) {
+    } else if (!milenage_crypto::randomBytes(rand16, 16)) {
         std::memset(k, 0, sizeof(k));
         std::memset(opc, 0, sizeof(opc));
         return Error::BAD_REQUEST;

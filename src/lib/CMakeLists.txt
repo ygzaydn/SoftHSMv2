@@ -32,7 +32,8 @@ set(SOURCES access.cpp
 
 if(WITH_MILENAGE)
     list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/milenage)
-    list(APPEND SOURCES milenage/Milenage.cpp
+    list(APPEND SOURCES milenage/CryptoBackend.cpp
+                        milenage/Milenage.cpp
                         milenage/FiveGAka.cpp
                         milenage/CredentialEnvelope.cpp
                         milenage/WireCodec.cpp
@@ -96,6 +97,12 @@ target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
 if(BUILD_TESTS)
     add_subdirectory(test)
 endif(BUILD_TESTS)
+
+if(WITH_MILENAGE)
+    # Independent of BUILD_TESTS/CppUnit -- see
+    # src/lib/milenage/test/CMakeLists.txt for why.
+    add_subdirectory(milenage/test)
+endif()
 
 ###############################################################################
 # Install
