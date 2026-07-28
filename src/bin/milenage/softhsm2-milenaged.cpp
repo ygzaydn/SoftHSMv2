@@ -308,6 +308,86 @@ void sendError(int fd, const std::string &msg)
     sendDaemonFrame(fd, 1, std::vector<uint8_t>(msg.begin(), msg.end()));
 }
 
+// Best-effort extraction of the SUPI (tag 0x0001) from a request, for
+// logging only -- not a validating parser (the real parse/validation
+// happens server-side in MilenageService via C_Sign). Returns
+// "unknown" if the request is too malformed to find it, which is fine
+// since the actual request will then also fail server-side and that
+// failure is what gets logged.
+std::string extractSupiForLogging(const std::vector<uint8_t> &request)
+{
+    size_t pos = 12;
+    while (pos + 6 <= request.size()) {
+        uint16_t tag = (uint16_t)((request[pos] << 8) | request[pos + 1]);
+        uint32_t len = readU32BE(&request[pos + 2]);
+        pos += 6;
+        if (pos + len > request.size()) break;
+        if (tag == SOFTHSM_MILENAGE_TAG_SUPI) {
+            return std::string(request.begin() + pos, request.begin() + pos + len);
+        }
+        pos += len;
+    }
+    return "unknown";
+}
+
+const char *operationName(uint8_t op)
+{
+    switch (op) {
+        case SOFTHSM_MILENAGE_OP_5G_HE_AV: return "5G-HE-AV";
+        case SOFTHSM_MILENAGE_OP_RESYNC: return "RESYNC";
+        case SOFTHSM_MILENAGE_OP_PROVISION: return "PROVISION";
+        case SOFTHSM_MILENAGE_OP_IMPORT_TRANSPORT: return "IMPORT-TRANSPORT";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string toHex(const uint8_t *data, size_t len)
+{
+    static const char *h = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; i++) {
+        out.push_back(h[data[i] >> 4]);
+        out.push_back(h[data[i] & 0xF]);
+    }
+    return out;
+}
+
+// Logs the output fields of a successful response (RAND/AUTN/XRES*/
+// KAUSF for AV, SQN_MS for resync) as hex. This is deliberately NOT
+// done for wrapped_k/wrapped_opc on the request side -- those are the
+// subscriber's long-lived wrapped credential, kept out of logs on
+// principle even though this whole channel is already plaintext TCP
+// on a trusted segment (see file header: RAND/AUTN/XRES*/KAUSF are
+// per-call, already visible to anyone who can see the wire at all,
+// e.g. via Wireshark, on the same trusted network this daemon
+// requires -- logging them adds no new exposure on that network).
+void logResponseFields(const std::string &opName, const std::string &supi,
+                        const std::vector<uint8_t> &response)
+{
+    size_t pos = 12;
+    while (pos + 6 <= response.size()) {
+        uint16_t tag = (uint16_t)((response[pos] << 8) | response[pos + 1]);
+        uint32_t len = readU32BE(&response[pos + 2]);
+        pos += 6;
+        if (pos + len > response.size()) break;
+        const char *name = nullptr;
+        switch (tag) {
+            case SOFTHSM_MILENAGE_TAG_OUT_RAND: name = "RAND"; break;
+            case SOFTHSM_MILENAGE_TAG_OUT_AUTN: name = "AUTN"; break;
+            case SOFTHSM_MILENAGE_TAG_OUT_XRES_STAR: name = "XRES*"; break;
+            case SOFTHSM_MILENAGE_TAG_OUT_KAUSF: name = "KAUSF"; break;
+            case SOFTHSM_MILENAGE_TAG_OUT_SQN_MS: name = "SQN_MS"; break;
+            default: break;
+        }
+        if (name != nullptr) {
+            logInfo("  " + opName + " " + supi + " " + std::string(name) + "=" +
+                    toHex(response.data() + pos, len));
+        }
+        pos += len;
+    }
+}
+
 // ---------------------------------------------------------------------
 // Request handling
 // ---------------------------------------------------------------------
@@ -349,10 +429,15 @@ bool handleRequest(Pkcs11Context &ctx, int connFd)
     }
 
     uint8_t operation = header[5];
+    std::string supi = extractSupiForLogging(request);
+    std::string opName = operationName(operation);
+
+    logInfo(opName + " requested for " + supi);
 
     // Plaintext provisioning is never accepted over this network
     // daemon, regardless of build flags -- see file header.
     if (operation == SOFTHSM_MILENAGE_OP_PROVISION) {
+        logInfo(opName + " refused for " + supi + " (plaintext provisioning not allowed over network)");
         sendError(connFd, "plaintext provisioning is not available over the network daemon; "
                            "use softhsm2-milenage locally on the HSM host, or transport-wrapped import");
         return true;
@@ -376,6 +461,7 @@ bool handleRequest(Pkcs11Context &ctx, int connFd)
 #ifdef WITH_MILENAGE_TRANSPORT_IMPORT
         case SOFTHSM_MILENAGE_OP_IMPORT_TRANSPORT:
             if (!ctx.haveTransportKek) {
+                logInfo(opName + " failed for " + supi + " (no Transport KEK configured)");
                 sendError(connFd, "no Transport KEK configured on this daemon");
                 return true;
             }
@@ -387,6 +473,7 @@ bool handleRequest(Pkcs11Context &ctx, int connFd)
             break;
 #endif
         default:
+            logInfo(opName + " refused for " + supi + " (unsupported operation)");
             sendError(connFd, "unsupported or unrecognized operation for this daemon");
             return true;
     }
@@ -394,14 +481,18 @@ bool handleRequest(Pkcs11Context &ctx, int connFd)
     std::vector<uint8_t> response;
     CK_RV rv = doSign(ctx, mech, key, request, response);
     if (rv == CKR_SIGNATURE_INVALID) {
+        logInfo(opName + " failed for " + supi + " (invalid signature / resync check failed)");
         sendError(connFd, "signature invalid (resynchronization check failed)");
         return true;
     }
     if (rv != CKR_OK) {
+        logInfo(opName + " failed for " + supi + " (operation error)");
         sendError(connFd, "operation failed");
         return true;
     }
 
+    logInfo(opName + " sent for " + supi + " (" + std::to_string(response.size()) + " bytes)");
+    logResponseFields(opName, supi, response);
     sendDaemonFrame(connFd, 0, response);
     if (!response.empty()) memset(response.data(), 0, response.size());
     return true;

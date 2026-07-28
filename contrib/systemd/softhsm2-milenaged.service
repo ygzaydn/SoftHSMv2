@@ -1,0 +1,48 @@
+[Unit]
+Description=SoftHSM Milenage 5G-AKA TCP daemon (S5GM)
+Documentation=file:/home/aselsan/SoftHSMv2/doc/MILENAGE-5G-AKA-DESIGN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=softhsm
+Group=softhsm
+
+EnvironmentFile=/etc/softhsm2/milenaged.env
+Environment=SOFTHSM2_CONF=/etc/softhsm2/softhsm2.conf
+
+ExecStart=/usr/local/bin/softhsm2-milenaged \
+    --module /usr/local/lib/softhsm/libsofthsm2.so \
+    --token-label ${TOKEN_LABEL} \
+    --pin-file /etc/softhsm2/milenaged-pin \
+    --listen-addr ${LISTEN_ADDR} \
+    --listen-port ${LISTEN_PORT}
+
+Restart=on-failure
+RestartSec=2s
+
+# Hardening. The daemon only needs: read its PIN file and softhsm2.conf,
+# read/write the token store, and listen on a TCP socket -- nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/softhsm2
+
+# LogsDirectory= creates /var/log/softhsm (owned by User=/Group= above)
+# before the daemon starts, and it's covered by ProtectSystem=strict.
+LogsDirectory=softhsm
+StandardOutput=append:/var/log/softhsm/softhsm2-milenaged.log
+StandardError=append:/var/log/softhsm/softhsm2-milenaged.log
+
+[Install]
+WantedBy=multi-user.target
