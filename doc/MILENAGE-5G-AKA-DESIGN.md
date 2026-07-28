@@ -642,6 +642,41 @@ which correctly reported "invalid MAC-S" (mapped from
 (`WITH_MILENAGE` unset, rebuilt from scratch) does not produce the
 `softhsm2-milenage` binary at all.
 
+### Commit 6 (test: add PoC script)
+
+Adds `testing/run-open5gs-milenage-poc.sh`, matching spec section 16.
+It builds SoftHSMv2 from scratch in an isolated `mktemp -d` directory
+with `-DWITH_MILENAGE=ON -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=ON`,
+initializes an isolated test token, and runs the full flow with the
+public 3GPP TS 35.207 Test Set 1 K/OPc (explicitly labeled as public
+test-vector data, not a real subscriber, in both the script's header
+comment and its inline echoed output): create-master-key -> provision
+-> a separate `softhsm2-milenage` invocation to generate a 5G HE AV
+from only the wrapped values (simulating the "close the provisioning
+process, start a new one" requirement) -> verifies RAND/AUTN/XRES*/
+KAUSF are present with the correct lengths -> a modified `wrapped_k`
+blob is rejected -> the same wrapped blobs bound to a different SUPI
+are rejected -> resync with a well-formed-but-invalid AUTS reports an
+invalid-MAC-S failure. Cleans up its temp directory via a `trap` on
+exit.
+
+**Actual result**: run in this session, all checks passed (echoed
+above the commit message verbatim). Requires `python3` for JSON/hex
+handling (used only for test-harness convenience, not by the CLI or
+library) and `cmake`, both present in this session's environment.
+
+**Not implemented, by explicit design choice, not oversight**: the
+script does not construct a *valid* AUTS to test the resync
+success path (only the failure path). Doing so requires computing
+f5*/f1* from the same test-vector K/OPc, which the algorithm
+implementation already covers as a positive-path round trip in
+`src/lib/milenage/test/standalone_selftest.cpp` ("verifyAuts accepts a
+validly constructed AUTS" / "recovers correct SQN_MS"); duplicating
+that math in a bash+python test harness would not add coverage, only
+risk a second, inconsistent implementation of the same algorithm in a
+test script. This is called out explicitly in the script's comments so
+it is not mistaken for missing coverage.
+
 **Not yet done**: the CLI does not yet implement `--pin-fd` being
 tested end-to-end (code path exists, exercised only via `--pin-file`
 in this session); `mlock()` is attempted on the plaintext credential
