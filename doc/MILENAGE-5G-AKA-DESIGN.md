@@ -881,3 +881,48 @@ scratch rebuild).
   code inspection (the CLI never has a code path that prints them; the
   provisioning flow never creates a plaintext PKCS#11 object) but were
   not asserted by an automated test that greps binary/log output.
+
+## 19. Sanitizer run (AddressSanitizer + UndefinedBehaviorSanitizer)
+
+Executed in this session, closing part of task item 9/10's "run
+sanitizers" requirement. Full library, CLI, and all 5 CTest suites
+were rebuilt from scratch with:
+
+```
+cmake -DWITH_CRYPTO_BACKEND=openssl -DWITH_MILENAGE=ON \
+      -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=ON \
+      -DWITH_MILENAGE_TEST_RAND=ON \
+      -DWITH_MILENAGE_TRANSPORT_IMPORT=ON \
+      -DENABLE_ECC=OFF -DENABLE_EDDSA=OFF \
+      -DCMAKE_C_FLAGS="-fsanitize=address,undefined -g -fno-omit-frame-pointer" \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -g -fno-omit-frame-pointer" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined" \
+      <repo>
+make -j$(nproc)
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 ctest --output-on-failure
+```
+
+(`ENABLE_ECC=OFF -DENABLE_EDDSA=OFF`: unrelated to Milenage, needed
+only because this environment's OpenSSL/sanitizer combination failed
+CMake's ECC-capability probe under sanitizer flags; does not affect
+any milenage code path.)
+
+**Result: 5/5 tests passed, zero ASan or UBSan reports of any kind**
+across `milenage-kat-test`, `milenage-service-test`,
+`milenage-pkcs11-e2e-test`, `milenage-pkcs11-restart-test`, and
+`milenage-pkcs11-transport-import-test`. The `.so` and every test
+binary (including the PKCS#11 client test binaries that `dlopen` it)
+were built with the same sanitizer flags, so this exercises the
+dlopen/PKCS#11-API boundary under instrumentation too, not just the
+directly-linked KAT/service tests. This covers every code path
+touched by this branch: Milenage/5G-AKA math, AES-KWP wrap/unwrap
+(both envelope formats), the wire codec, `MilenageService`
+orchestration, the full PKCS#11 `C_SignInit`/`C_Sign` dispatch for all
+four mechanisms, session key-buffer lifecycle/wiping, and the
+Transport KEK two-key flow.
+
+Not run under sanitizers in this session: the `softhsm2-milenage` CLI
+itself (only the library and the internal test binaries were built
+with sanitizer flags in this pass) and `testing/run-open5gs-milenage-poc.sh`
+(which builds its own separate, non-instrumented build directory).
