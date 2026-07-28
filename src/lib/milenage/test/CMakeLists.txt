@@ -55,6 +55,24 @@ add_test(NAME milenage-pkcs11-restart-test
                  $<TARGET_FILE:milenage-pkcs11-restart-test>
          )
 
+if(WITH_MILENAGE_PLAINTEXT_PROVISIONING)
+    # The daemon test's provisioning step (done locally via
+    # softhsm2-milenage, never over the network -- the daemon refuses
+    # plaintext provisioning unconditionally) needs a build that has
+    # plaintext provisioning available at all.
+    add_executable(milenage-daemon-tcp-client-test daemon_tcp_client_test.cpp)
+    target_compile_options(milenage-daemon-tcp-client-test PRIVATE ${COMPILE_OPTIONS})
+
+    add_test(NAME milenage-daemon-tcp-test
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_daemon_ctest.sh
+                     $<TARGET_FILE:softhsm2>
+                     $<TARGET_FILE:softhsm2-util>
+                     $<TARGET_FILE:softhsm2-milenage>
+                     $<TARGET_FILE:softhsm2-milenaged>
+                     $<TARGET_FILE:milenage-daemon-tcp-client-test>
+             )
+endif()
+
 if(WITH_MILENAGE_TRANSPORT_IMPORT)
     add_executable(milenage-pkcs11-transport-import-test pkcs11_transport_import_test.cpp)
     target_compile_options(milenage-pkcs11-transport-import-test PRIVATE ${COMPILE_OPTIONS})

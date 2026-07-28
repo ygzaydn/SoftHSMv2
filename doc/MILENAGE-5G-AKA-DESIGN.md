@@ -965,3 +965,74 @@ the new required flag and re-run end to end (still passes in full).
 is simply the recommended alternative in help text and warnings); no
 change was needed to `import-transport-wrapped` itself since it never
 accepted plaintext input in the first place.
+
+## 21. Network daemon (softhsm2-milenaged)
+
+Added by explicit request: HSM and 5G core may run on different
+hosts/VMs, so an in-process PKCS#11 call is not enough. TLS was
+explicitly deferred by request ("TLS'i boşverip şimdilik ilerleyelim");
+plain TCP, 1 UDM : 1 HSM, address configured as `ip:port`.
+
+`src/bin/milenage/softhsm2-milenaged.cpp` dlopen's the PKCS#11 module
+once at startup (same approach as the CLI), logs in, resolves the
+Master Storage Key (and Transport KEK, if `WITH_MILENAGE_TRANSPORT_IMPORT`
+and one exists) once, then listens on a plain TCP socket. Framing:
+
+```
+request  := <S5GM message>                         (client -> daemon)
+response := u32be payload_len | u8 status | payload  (daemon -> client)
+              status 0 = OK,    payload = an S5GM response message
+              status 1 = ERROR, payload = short UTF-8 error text (no secrets)
+```
+
+The request needs no extra framing because the S5GM header is already
+self-describing (magic + total_length); the daemon reads the 12-byte
+header, then exactly `total_length-12` more bytes. One connection is
+served at a time (sequential `accept()` loop, no threading) since the
+underlying PKCS#11 session is not safe for concurrent `C_SignInit`/
+`C_Sign` pairs — matches the "1 UDM : 1 HSM" model this was built for.
+
+**Hard security rule, not a build option**: `CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED`
+(plaintext K/OPc on the wire) is refused unconditionally by the daemon
+regardless of how the library was built — see `handleRequest()`. An
+unauthenticated plaintext TCP socket is never an acceptable channel for
+raw key material, at any configuration. Provisioning must happen
+locally on the HSM host via `softhsm2-milenage provision` today, or via
+`import-transport-wrapped` (which only ever puts transport-wrapped
+ciphertext on the wire, so it is allowed over this daemon).
+
+**Explicit, loud warning, repeated in the binary's own `--help` output
+and startup log line**: this is plaintext, unauthenticated TCP. No
+TLS, no client auth, no integrity protection beyond what AES-KWP
+already gives the wrapped payloads. Only acceptable on a network
+segment already as trusted as the HSM host's own process memory (same
+trust boundary as design doc section 3) -- e.g. a private VLAN between
+exactly the UDM host and the HSM host. TLS/mTLS was explicitly
+deferred by request and must be added before this is used on any
+network that is not already fully trusted.
+
+**Actual test results**: `src/lib/milenage/test/daemon_tcp_client_test.cpp`
++ `run_daemon_ctest.sh` (provisions a token locally, starts the daemon
+in the background on a random high port, drives a real TCP client
+against it, tears down) -- 15/15 checks pass, registered as CTest
+`milenage-daemon-tcp-test` (gated on `WITH_MILENAGE_PLAINTEXT_PROVISIONING`,
+since the test's local provisioning step needs it; the daemon itself
+needs no such flag for AV/resync/transport-import). Covers: real TCP
+connect, AV request/response round trip with correct field sizes,
+multiple requests over one persistent connection, fresh RAND
+confirmed per request, resync with an invalid AUTS correctly reported
+as a daemon error status, and plaintext-provisioning unconditionally
+refused with a non-secret-leaking error message. Full `ctest` suite
+(6/6) passes with this test included. Confirmed absent from a default
+build and from a `WITH_MILENAGE_PLAINTEXT_PROVISIONING`-off build
+(correctly not registered).
+
+**Not done**: TLS/mTLS (explicitly deferred by request); support for
+more than one concurrent client connection meaningfully (a second
+client would simply block behind the `accept()` loop, not get a
+malformed response, but there's no fairness/timeout handling); no
+systemd unit/init script; no rate limiting or per-client audit
+logging beyond the single connect/disconnect log lines; the daemon's
+own binary was not run under AddressSanitizer/UndefinedBehaviorSanitizer
+in this session (the library and other test binaries were, per
+section 19, but this daemon is new and wasn't part of that pass).
