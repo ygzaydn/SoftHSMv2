@@ -341,22 +341,75 @@ mechanisms absent from default builds, CLI argv/output/permission tests.
 ## 17. Implementation status (source of truth — do not trust section
 headers above that describe target behavior as if built)
 
-Implemented in this commit:
+### Commit 1 (docs: add milenage hsm design)
 - This design document.
 - `src/lib/milenage/softhsm_milenage.h`: mechanism ID constants, wire
   format tag/opcode enums, envelope struct layout constants, Master Key
-  template constants — as compile-time constants/comments only, **no
-  logic**.
-- Directory skeleton `src/lib/milenage/` with stub `.cpp`/`.h` files
-  containing function signatures for the primitives in §12 and
-  `TODO(milenage)` markers, so the follow-up commit has a concrete shape
-  to fill in. These stubs are **not wired into `SoftHSM.cpp`'s mechanism
-  dispatch, not added to any CMakeLists/Makefile.am, and not compiled**.
-- `testing/run-open5gs-milenage-poc.sh`: **not created this phase**.
+  template constants — compile-time constants only, no logic.
+- Header-only signature stubs for `Milenage.h`/`FiveGAka.h`/
+  `CredentialEnvelope.h`.
 
-Not implemented (all of §§2-16 beyond the above): actual Milenage/5G-AKA
-math, AES-KWP wrap/unwrap, wire-format parser, PKCS#11 mechanism dispatch
-wiring, Master Key generation/attribute-enforcement code, the CLI tool,
-Transport KEK, all build-flag wiring, and all tests. Nothing in this
-phase has been compiled, executed, or otherwise validated — there is no
-test evidence to report because no test-eligible code exists yet.
+### Commit 2 (feat: add milenage and 5g aka primitives)
+Implemented and **actually compiled and run** (not just written):
+- `Milenage.cpp`: `deriveOpc`, `f1`, `f1*`, `f2345` (RES/CK/IK/AK),
+  `f5*`, `buildAutn`, `verifyAuts`, built on OpenSSL AES-128-ECB single
+  block encryption (`EVP_aes_128_ecb`), following the TS 35.206 Annex 3
+  reference-algorithm *structure* (TEMP/OUTn/rotate constants), not
+  copied from any 3GPP/Open5GS/vendor source.
+- `FiveGAka.cpp`: `deriveXresStar`, `deriveKausf` using the generic
+  3GPP KDF (HMAC-SHA-256 over `FC || P0 || L0 || P1 || L1 || ...`) via
+  OpenSSL `HMAC()`.
+- `CredentialEnvelope.cpp`: builds the 58-byte plaintext envelope from
+  §9, wraps/unwraps it with OpenSSL's `EVP_aes_256_wrap_pad` cipher
+  (RFC 5649 AES-KWP), validates every envelope field on unwrap, and
+  does constant-time subscriber-binding comparison. **Deviation from
+  the original design**: `wrapSecret`/`unwrapSecret` currently take the
+  Master Storage Key as a raw 32-byte buffer parameter rather than a
+  PKCS#11 key handle — see the INTERIM note in `CredentialEnvelope.h`.
+  This lets the envelope logic be implemented and tested before the
+  PKCS#11 dispatch/key-object work exists, but it must be replaced
+  before this key is ever a real non-extractable token object, since a
+  raw-buffer interface is incompatible with "the key value never
+  leaves the crypto layer."
+- `test/standalone_selftest.cpp`: a standalone (non-CppUnit,
+  non-CMake/Autotools-integrated) test program; see its header comment
+  for exact build command and honesty notes about which vectors are
+  externally verified vs. self-consistency-only.
+
+**Deviation from spec §12**: implemented directly against OpenSSL EVP
+(this dev environment has no Botan installed — `dpkg -l` showed no
+`libbotan-2/3-dev` package and no `botan-2`/`botan-3` pkg-config
+module), not against SoftHSM's backend-selectable `CryptoFactory`
+abstraction (`src/lib/crypto/BotanCryptoFactory.*` /
+`src/lib/crypto/OSSL*.h`). A follow-up commit must port these
+primitives onto SoftHSM's existing internal AES/HMAC-SHA-256/RNG
+abstractions so the milenage subsystem respects the same OpenSSL-vs-
+Botan build-time backend choice as the rest of the codebase, rather
+than hardcoding an OpenSSL dependency.
+
+**Actual test results** (run via the command in
+`test/standalone_selftest.cpp`'s header, on this session's dev
+environment, OpenSSL 3.0.2): 34/34 checks pass, 0 failures, no compiler
+warnings under `-Wall -Wextra -std=c++17`. Externally verified against
+the published 3GPP TS 35.207 Test Set 1 vectors: OPc, MAC-A (`f1`),
+RES (`f2`), and AK (`f5`) all match exactly. CK and IK are computed but
+**not asserted against an external vector** — no independently-verified
+TS 35.207 CK/IK value for Test Set 1 was available in this session, and
+guessing one to assert against would misrepresent validation coverage.
+The 5G-AKA KDF (XRES-star, KAUSF) tests are determinism/self-consistency
+checks only; no TS 33.501 Annex A KDF known-answer vector was available
+to verify against this session. AUTN/AUTS resync round-trip and tamper/
+truncation/wrong-key/cross-subscriber-binding rejection in the envelope
+layer are exercised and pass, but these are internal round-trip tests,
+not official RFC 5649 or TS 35.208 AUTS KATs.
+
+**Not yet done, still open**: official RFC 5649 AES-KWP known-answer
+vectors, official TS 35.208 full test-vector set (sets 1-20, including
+AUTS/resync-specific vectors), official TS 33.501 Annex A XRES*/KAUSF
+KAT, PKCS#11 mechanism dispatch wiring into `SoftHSM.cpp`, Master Key
+generation/attribute-enforcement code, the CLI tool, Transport KEK,
+all CMake/Autotools build-flag wiring (`WITH_MILENAGE*`), integration
+into the CppUnit suite under `src/lib/crypto/test`, and
+`testing/run-open5gs-milenage-poc.sh`. Nothing in `src/lib/milenage` is
+referenced by any `CMakeLists.txt`/`Makefile.am` yet, so default
+SoftHSM builds remain unaffected.

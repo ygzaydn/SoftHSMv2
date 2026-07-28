@@ -28,23 +28,35 @@ enum class Error { OK, GENERIC_FAILURE };
  * digits, exact match, no whitespace/case variation accepted. */
 bool isCanonicalSupi(const std::string &supi);
 
-/* TODO(milenage): build the 58-byte plaintext envelope
- * (SOFTHSM_MILENAGE_ENVELOPE_PLAINTEXT_LEN) for the given secret and
- * canonical SUPI, then AES-KWP-wrap it under masterKey. masterKey is an
- * opaque reference to a PKCS#11-backed key operation supplied by the
- * caller (not a raw key buffer) once wired into SoftHSM's crypto layer;
- * left abstract here pending that wiring. */
+/* Master key length (AES-256). */
+constexpr size_t MASTER_KEY_LEN = 32;
+
+/* Builds the 58-byte plaintext envelope (see
+ * SOFTHSM_MILENAGE_ENVELOPE_PLAINTEXT_LEN) for the given secret and
+ * canonical SUPI, then AES-KWP-wraps it (RFC 5649) under masterKey.
+ *
+ * INTERIM: masterKey is a raw 32-byte key buffer here so this module
+ * can be implemented and unit-tested standalone. The design in
+ * doc/MILENAGE-5G-AKA-DESIGN.md section 5.1 requires the Master
+ * Storage Key to be non-extractable and used only via a PKCS#11 key
+ * handle; a follow-up commit must replace this raw-buffer interface
+ * with one driven by SoftHSM's internal key-object/crypto layer so
+ * the key value itself never exists outside that layer. Do not call
+ * this function with a token's real Master Storage Key value obtained
+ * by any extraction path. */
 Error wrapSecret(const std::string &canonicalSupi, SecretType type,
                   const uint8_t secret[16],
+                  const uint8_t masterKey[MASTER_KEY_LEN],
                   std::vector<uint8_t> &wrappedOut);
 
-/* TODO(milenage): AES-KWP-unwrap, parse envelope, validate magic/
- * version/algorithm/secret_type/reserved/secret_length, recompute and
- * constant-time-compare subscriber_binding against canonicalSupi.
+/* AES-KWP-unwraps, parses the envelope, validates magic/version/
+ * algorithm/secret_type/reserved/secret_length, recomputes and
+ * constant-time-compares subscriber_binding against canonicalSupi.
  * Any failure returns Error::GENERIC_FAILURE and leaves secretOut
- * untouched/wiped. */
+ * untouched. See INTERIM note on wrapSecret regarding masterKey. */
 Error unwrapSecret(const std::string &canonicalSupi, SecretType expectedType,
                     const std::vector<uint8_t> &wrapped,
+                    const uint8_t masterKey[MASTER_KEY_LEN],
                     uint8_t secretOut[16]);
 
 } // namespace milenage_envelope
