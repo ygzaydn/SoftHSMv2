@@ -588,12 +588,70 @@ target, it's a standalone driver dlopen-ing the built `.so`):
 gap described above (flag exists, nothing reachable via PKCS#11 uses
 it yet); `CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED` and
 `CKM_SOFTHSM_MILENAGE_RAW_TEST` are still entirely unimplemented (not
-even reserved in dispatch); the CLI tool (`softhsm2-milenage`); the
-Autotools (`configure.ac`/`Makefile.am`) side of the build flags --
-only CMake was done, so an Autotools build of this branch does not
-have `WITH_MILENAGE` at all yet; integration into the project's own
-CppUnit suite/`ctest` (the E2E tests here are standalone drivers, not
-part of `BUILD_TESTS`); official RFC 5649 / TS 35.208 / TS 33.501
-Annex A known-answer vectors (still only the TS 35.207 Test Set 1
-partial match from commit 2); installing `softhsm_milenage.h` as a
-public header; and `testing/run-open5gs-milenage-poc.sh`.
+even reserved in dispatch); the Autotools (`configure.ac`/
+`Makefile.am`) side of the build flags -- only CMake was done, so an
+Autotools build of this branch does not have `WITH_MILENAGE` at all
+yet; integration into the project's own CppUnit suite/`ctest` (the E2E
+tests here are standalone drivers, not part of `BUILD_TESTS`); official
+RFC 5649 / TS 35.208 / TS 33.501 Annex A known-answer vectors (still
+only the TS 35.207 Test Set 1 partial match from commit 2); installing
+`softhsm_milenage.h` as a public header; and
+`testing/run-open5gs-milenage-poc.sh`.
+
+### Commit 5 (feat: add provisioning CLI)
+
+Adds `src/bin/milenage/softhsm2-milenage.cpp`, built as
+`softhsm2-milenage` only when `WITH_MILENAGE` is on (`src/bin/CMakeLists.txt`
+gates the new `src/bin/milenage` subdirectory). It is a generic PKCS#11
+client (loads `--module` at runtime via `dlopen`, like `softhsm2-util`
+already does), not something linked against `libsofthsm2` internals.
+
+Implements the required subcommands from spec section 8:
+`create-master-key`, `provision`, `generate-5g-av`, `resync`,
+`inspect`. Does **not** implement `create-transport-kek` /
+`import-transport-wrapped` -- they exit with an explicit "not
+implemented" message rather than silently doing nothing, since the
+Transport KEK was never implemented server-side either (section 5.2).
+
+Security properties implemented and directly exercised, not just
+asserted: no `--k`, `--opc`, or literal `--pin` option exists anywhere
+in the argument parser (`--pin`/`--k`/`--opc` are recognized only to
+immediately refuse with an explanatory error); `provision`'s plaintext
+K/OPc input comes only from `--input-fd` or stdin (32 bytes: K then
+OPc), never argv or an environment variable; the process disables core
+dumps on startup (`prctl(PR_SET_DUMPABLE, 0)` plus `setrlimit(RLIMIT_CORE,
+{0,0})`); every buffer holding plaintext K/OPc, the wire request, or
+the wire response is explicitly zeroed after use; `--token-label`/
+`--token-serial` are the normal way to select a token, `--slot-id` is
+documented as an override only, and both token and Master Key lookup
+(`C_FindObjectsInit`/`C_FindObjects`) explicitly refuse an ambiguous
+match (more than one result) rather than silently picking the first;
+output files are created with `open(..., O_CREAT|O_EXCL, 0600)` and
+refuse to overwrite an existing file without `--force`.
+
+**Actual test results**: built via the project's own CMake
+(`-DWITH_MILENAGE=ON -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=ON`, from
+scratch), then run end-to-end against a freshly initialized token:
+`create-master-key` -> `provision` (stdin credential input, wrote a
+0600 output file, second run correctly refused to overwrite it without
+`--force`) -> `generate-5g-av` (produced RAND/AUTN/XRES*/KAUSF as hex
+JSON) -> `inspect` (reported `extractable: false, sensitive: true`)
+-> `resync` with a correctly-14-byte but semantically-garbage AUTS,
+which correctly reported "invalid MAC-S" (mapped from
+`CKR_SIGNATURE_INVALID`). Also confirmed a default build
+(`WITH_MILENAGE` unset, rebuilt from scratch) does not produce the
+`softhsm2-milenage` binary at all.
+
+**Not yet done**: the CLI does not yet implement `--pin-fd` being
+tested end-to-end (code path exists, exercised only via `--pin-file`
+in this session); `mlock()` is attempted on the plaintext credential
+buffer in `provision` but its success is not verified end-to-end in
+this session (best-effort only -- failure is non-fatal since the
+buffer is zeroed regardless); no man page; not integrated into
+`Makefile.am`/`configure.ac` (CMake only, matching commit 4's gap);
+and the JSON emitted by `generate-5g-av`/`resync`/`inspect` is
+hand-rolled string concatenation (adequate for this fixed,
+programmer-controlled field set, but not a general JSON encoder --
+acceptable here only because none of the interpolated values can
+contain characters requiring JSON escaping other than the label
+string, which does go through `jsonEscape()`).
