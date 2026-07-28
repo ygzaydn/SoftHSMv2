@@ -13,6 +13,10 @@
  *       ../CredentialEnvelope.cpp -lcrypto -o /tmp/milenage_selftest
  *   /tmp/milenage_selftest
  *
+ * See also service_selftest.cpp (wire codec + service orchestration),
+ * and pkcs11_e2e_test.cpp / pkcs11_restart_test.cpp (real PKCS#11-level
+ * tests against a built libsofthsm2.so, requiring WITH_MILENAGE=ON).
+ *
  * OPc, MAC-A (f1), RES (f2), and AK (f5) below are checked against the
  * published 3GPP TS 35.207 Test Set 1 vectors and were confirmed to
  * match when this file was last run. CK and IK are computed but not

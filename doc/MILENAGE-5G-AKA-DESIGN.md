@@ -451,13 +451,149 @@ replacing the raw-buffer master key with SoftHSM's real key-object
 lookup so the key value is never copied out of that layer. None of
 that PKCS#11-facing work happened this session.
 
-**Not yet done, still open**: official RFC 5649 AES-KWP known-answer
-vectors, official TS 35.208 full test-vector set (sets 1-20, including
-AUTS/resync-specific vectors), official TS 33.501 Annex A XRES*/KAUSF
-KAT, the `C_SignInit`/`C_Sign` PKCS#11 dispatch wiring described above,
-Master Key generation/attribute-enforcement code, the CLI tool,
-Transport KEK, all CMake/Autotools build-flag wiring (`WITH_MILENAGE*`),
-integration into the CppUnit suite under `src/lib/crypto/test`, and
-`testing/run-open5gs-milenage-poc.sh`. Nothing in `src/lib/milenage` is
-referenced by any `CMakeLists.txt`/`Makefile.am` yet, so default
-SoftHSM builds remain unaffected.
+### Commit 4 (feat: wire vendor mechanisms into PKCS#11 dispatch + CMake build flags)
+
+This commit closes the gap called out at the end of commit 3: the
+Milenage vendor mechanisms are now real, working PKCS#11 mechanisms in
+`SoftHSM.cpp`, gated by a new `WITH_MILENAGE` CMake option (default
+OFF), and were verified against the actual built `libsofthsm2.so`
+through the standard PKCS#11 API (`dlopen` + `C_GetFunctionList`), not
+just through `MilenageService`'s internal API.
+
+**Build flags added** (`CMakeLists.txt`, `cmake/modules/CompilerOptions.cmake`,
+`config.h.in.cmake`), all default OFF:
+- `WITH_MILENAGE` -- builds `src/lib/milenage/*.cpp` into `libsofthsm2`
+  and compiles the `#ifdef WITH_MILENAGE` blocks in `SoftHSM.cpp`/
+  `Session.h`/`Session.cpp`. Requires `WITH_CRYPTO_BACKEND=openssl`
+  (enforced with `message(FATAL_ERROR ...)` at configure time) because
+  `src/lib/milenage` calls OpenSSL EVP directly (see commit 2's
+  deviation note; still not ported onto `CryptoFactory`).
+- `WITH_MILENAGE_PLAINTEXT_PROVISIONING` -- without it,
+  `CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED` is not registered as a
+  supported mechanism at all (absent from `C_GetMechanismList`,
+  `C_SignInit` returns `CKR_MECHANISM_INVALID`), even when
+  `WITH_MILENAGE` is on. Verified directly: a `WITH_MILENAGE=ON,
+  WITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF` build was built from
+  scratch and confirmed to reject `C_SignInit` for the provision
+  mechanism with `CKR_MECHANISM_INVALID` while still accepting the AV
+  mechanism.
+- `WITH_MILENAGE_TEST_RAND` -- currently only gates a CMake status
+  message; `MilenageService::generate5gHeAv`'s `testRand` parameter
+  itself has no build-time gate yet because nothing in
+  `src/lib/SoftHSM.cpp`'s `MilenageSign` currently exposes a way to
+  pass a caller-supplied RAND over the wire protocol at all (the
+  `SOFTHSM_MILENAGE_TAG_RAND` tag is defined but `MilenageSign` never
+  reads it for the AV operation). This is a real gap: the flag exists
+  but does not yet enable anything reachable via PKCS#11. Fixing it
+  requires threading a `#ifdef WITH_MILENAGE_TEST_RAND` request-parsing
+  path through `MilenageSign` in `SoftHSM.cpp`.
+- Requiring `WITH_MILENAGE_TEST_RAND`/`WITH_MILENAGE_PLAINTEXT_PROVISIONING`
+  without `WITH_MILENAGE` is a configure-time fatal error.
+
+**PKCS#11 dispatch wiring** (`src/lib/SoftHSM.cpp`, `src/lib/session_mgr/Session.h/.cpp`):
+- New `SESSION_OP_MILENAGE` session operation type; `Session` gained
+  `setMilenageOp`/`getMilenageMechanism`/`getMilenageMasterKey`, backed
+  by a 32-byte buffer that `resetOp()` explicitly zeroes on every path
+  (success, failure, or a session/library teardown that calls the
+  destructor, which calls `resetOp()`).
+- `isMilenageMechanism()` / `MilenageSignInit()` / `MilenageSign()`
+  added following the exact structure of the existing `isMacMechanism`/
+  `MacSignInit`/`MacSign` path: `C_SignInit` checks
+  `session->getOpType() != SESSION_OP_NONE`, does the standard
+  `haveRead` login/privacy check, requires `CKA_SIGN=TRUE`, and calls
+  the existing `isMechanismPermitted()` (which enforces
+  `CKA_ALLOWED_MECHANISMS` and the global `slots.mechanisms`
+  configuration) exactly like every other mechanism in this codebase.
+- `isValidMilenageMasterKey()` independently re-verifies the full
+  Master Storage Key template from section 5.1 (class, key type,
+  extractable/sensitive/modifiable/copyable, encrypt/decrypt/wrap/
+  unwrap/derive all false, sign true, label, id) directly against the
+  object's stored attributes on every `C_SignInit`, not just relying on
+  `CKA_ALLOWED_MECHANISMS`.
+- The raw key value is obtained via the existing `SoftHSM::getSymmetricKey()`
+  helper (the same one `MacSignInit` uses), which already handles
+  decrypting `CKA_VALUE` for a `CKA_PRIVATE` object -- this is the
+  proper "read inside the crypto layer regardless of
+  `CKA_EXTRACTABLE`" path, not a new extraction mechanism.
+- `C_Sign`'s output-size-query calling convention (`pSignature ==
+  NULL_PTR`) is handled by `milenageResponseSize()`, which computes the
+  exact response length from the mechanism type alone (all three
+  operations have a fixed size given the fixed 58-byte envelope
+  plaintext) without touching `MilenageService` at all -- satisfying
+  "must not unwrap or generate RAND" for the size query.
+- `C_SignUpdate`/`C_SignFinal` explicitly return
+  `CKR_FUNCTION_NOT_SUPPORTED` for a `SESSION_OP_MILENAGE` session and
+  reset the operation (this reset was a bug found during testing: the
+  first version left the session's operation stuck as active after a
+  rejected `C_SignUpdate`, which made every subsequent `C_SignInit`
+  fail with `CKR_OPERATION_ACTIVE` -- fixed by calling
+  `session->resetOp()` before returning the rejection).
+- `CKM_SOFTHSM_5G_HE_AV_WRAPPED` / `CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED`
+  / (conditionally) `CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED` were added
+  to `prepareSupportedMechanisms()`'s name/ID map, which is what feeds
+  both `C_GetMechanismList` and the global half of
+  `isMechanismPermitted()`.
+
+**A real bug found and fixed while testing against the built library**:
+`isValidMilenageMasterKey()`'s first version compared `CKA_LABEL` and
+`CKA_ID` directly against the expected constants and always failed.
+The reason: for a `CKA_PRIVATE=TRUE` object, SoftHSM's generic
+attribute-update path (`P11Attribute::updateAttr()` in
+`P11Attributes.cpp`) encrypts *every* byte-string attribute at rest,
+not just `CKA_VALUE` -- something not obvious from reading `SoftHSM.cpp`
+alone and only surfaced by actually running `C_GenerateKey` against the
+real object store and inspecting the failure. Fixed by decrypting
+`CKA_LABEL`/`CKA_ID` via `token->decrypt()` before comparison, the same
+way `getSymmetricKey()` already decrypts `CKA_VALUE`. This is exactly
+the kind of bug that pure design/unit-level work (commits 1-3) cannot
+catch, and the reason the "must actually build and test" bar mattered
+here.
+
+**Actual end-to-end test results**, run against a from-scratch build in
+this session's dev environment (OpenSSL 3.0.2, no SQLite, no CppUnit --
+so this is *not* integrated with `ctest`/the project's own test
+target, it's a standalone driver dlopen-ing the built `.so`):
+
+- `src/lib/milenage/test/pkcs11_e2e_test.cpp` (30/30 checks pass): real
+  `C_Initialize` -> `C_OpenSession` -> `C_Login` -> `C_GenerateKey` (full
+  Master Key template) -> Master Key rejected for ordinary
+  `CKM_AES_ECB` -> Master Key value not retrievable via
+  `C_GetAttributeValue` -> `C_SignInit`/`C_Sign` for provision (including
+  the `pSignature == NULL_PTR` size-query path) -> wrapped K/OPc
+  extracted from the real wire response -> `C_SignUpdate`/`C_SignFinal`
+  rejected with `CKR_FUNCTION_NOT_SUPPORTED` -> `C_SignInit`/`C_Sign` for
+  the AV mechanism, response shape checked field-by-field (exactly
+  RAND/AUTN/XRES*/KAUSF, nothing else) -> wrong-SUPI credential rejected
+  -> resync with a garbage AUTS returns `CKR_SIGNATURE_INVALID` ->
+  `C_Logout` -> AV mechanism refused after logout.
+- `src/lib/milenage/test/pkcs11_restart_test.cpp` (spec section 15's
+  "wrapped credentials remain usable after process restart"): two
+  genuinely separate process invocations (separate `exec`, separate
+  `dlopen`, separate `C_Initialize`) against the same on-disk token --
+  process A generates the Master Key, provisions wrapped K/OPc, and
+  exits; process B re-`dlopen`s the module, logs in fresh, finds the
+  Master Key by label via `C_FindObjectsInit`/`C_FindObjects`, and
+  successfully generates a full AV from the wrapped values process A
+  wrote to a file. Passed.
+- Confirmed by building three separate configurations from scratch and
+  rerunning the standalone unit tests (34 + 20 checks) plus the PKCS#11
+  E2E test (30 checks) against each: (1) default build (`WITH_MILENAGE`
+  unset) -- `pkcs11_e2e_test` correctly gets `CKR_MECHANISM_INVALID`
+  for every vendor mechanism, proving they are genuinely absent, not
+  just untested; (2) `WITH_MILENAGE=ON` with both test-only flags on;
+  (3) `WITH_MILENAGE=ON` with `WITH_MILENAGE_PLAINTEXT_PROVISIONING`
+  left off -- AV/resync work, provision correctly rejected.
+
+**Still not done after this commit**: the `WITH_MILENAGE_TEST_RAND`
+gap described above (flag exists, nothing reachable via PKCS#11 uses
+it yet); `CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED` and
+`CKM_SOFTHSM_MILENAGE_RAW_TEST` are still entirely unimplemented (not
+even reserved in dispatch); the CLI tool (`softhsm2-milenage`); the
+Autotools (`configure.ac`/`Makefile.am`) side of the build flags --
+only CMake was done, so an Autotools build of this branch does not
+have `WITH_MILENAGE` at all yet; integration into the project's own
+CppUnit suite/`ctest` (the E2E tests here are standalone drivers, not
+part of `BUILD_TESTS`); official RFC 5649 / TS 35.208 / TS 33.501
+Annex A known-answer vectors (still only the TS 35.207 Test Set 1
+partial match from commit 2); installing `softhsm_milenage.h` as a
+public header; and `testing/run-open5gs-milenage-poc.sh`.

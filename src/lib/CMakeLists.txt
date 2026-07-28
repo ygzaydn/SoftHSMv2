@@ -30,6 +30,16 @@ set(SOURCES access.cpp
             SoftHSM.cpp
             )
 
+if(WITH_MILENAGE)
+    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/milenage)
+    list(APPEND SOURCES milenage/Milenage.cpp
+                        milenage/FiveGAka.cpp
+                        milenage/CredentialEnvelope.cpp
+                        milenage/WireCodec.cpp
+                        milenage/MilenageService.cpp
+                        )
+endif()
+
 set(STATIC_FILES softhsm_common
                  softhsm_crypto
                  softhsm_datamgr

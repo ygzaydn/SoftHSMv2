@@ -1,9 +1,12 @@
 # src/lib/milenage
 
-Not yet wired into any CMakeLists.txt / Makefile.am, not compiled or
-linked as part of libsofthsm2, not wired into PKCS#11 mechanism
-dispatch. See `doc/MILENAGE-5G-AKA-DESIGN.md` (especially section 17)
-for the design and current implementation-status source of truth.
+Built into `libsofthsm2` and wired into real PKCS#11 dispatch
+(`C_SignInit`/`C_Sign` in `src/lib/SoftHSM.cpp`) when CMake is
+configured with `-DWITH_MILENAGE=ON` (default OFF, requires
+`-DWITH_CRYPTO_BACKEND=openssl`). Not yet ported to Autotools
+(`configure.ac`/`Makefile.am`). See `doc/MILENAGE-5G-AKA-DESIGN.md`
+(especially section 17) for the design and current
+implementation-status source of truth.
 
 - `softhsm_milenage.h` — vendor mechanism IDs, wire-format tags,
   envelope layout constants, master-key template constants.
@@ -31,6 +34,30 @@ Implemented against OpenSSL EVP directly rather than SoftHSM's
 Botan/OpenSSL-selectable `CryptoFactory` abstraction, because this dev
 environment has no Botan installed. Porting onto that abstraction is
 still open — see design doc section 17.
+
+## PKCS#11 dispatch
+
+`src/lib/SoftHSM.cpp` gains, under `#ifdef WITH_MILENAGE`:
+`isMilenageMechanism()`, `isValidMilenageMasterKey()`,
+`milenageResponseSize()`, `SoftHSM::MilenageSignInit()`,
+`SoftHSM::MilenageSign()`, and dispatch branches in `C_SignInit`,
+`C_Sign`, `C_SignUpdate` (rejects with `CKR_FUNCTION_NOT_SUPPORTED`),
+and `C_SignFinal` (same). `src/lib/session_mgr/Session.h`/`.cpp` gain a
+`SESSION_OP_MILENAGE` op type and a 32-byte Master Key buffer that
+`resetOp()` zeroes on every path.
+
+Verified with real PKCS#11-level tests (dlopen the built `.so`, drive
+it through the standard `C_GetFunctionList` entry point) rather than
+only through `MilenageService`'s internal API — see
+`test/pkcs11_e2e_test.cpp` (30/30 checks) and
+`test/pkcs11_restart_test.cpp` (cross-process persistence, two separate
+`exec`s). Build/run commands are in each file's header comment. Both
+were also run against a default build (`WITH_MILENAGE` unset) to
+confirm the vendor mechanisms are genuinely absent
+(`CKR_MECHANISM_INVALID`), and against a
+`WITH_MILENAGE=ON,WITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF` build to
+confirm the provisioning mechanism specifically is gated off while
+AV/resync remain available.
 
 - `WireCodec.h` / `WireCodec.cpp` — TLV request/response codec for the
   wire format in the design doc §10 (magic/version/operation

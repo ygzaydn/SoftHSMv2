@@ -163,6 +163,15 @@
 /* Compile with GOST support */
 #cmakedefine WITH_GOST @WITH_GOST@
 
+/* Compile with Milenage / 5G-AKA vendor PKCS#11 mechanisms */
+#cmakedefine WITH_MILENAGE @WITH_MILENAGE@
+
+/* Allow caller-supplied RAND in the 5G HE AV mechanism (testing only) */
+#cmakedefine WITH_MILENAGE_TEST_RAND @WITH_MILENAGE_TEST_RAND@
+
+/* Enable plaintext-input credential provisioning (development/PoC only) */
+#cmakedefine WITH_MILENAGE_PLAINTEXT_PROVISIONING @WITH_MILENAGE_PLAINTEXT_PROVISIONING@
+
 /* Compile with OpenSSL support */
 #cmakedefine WITH_OPENSSL @WITH_OPENSSL@
 

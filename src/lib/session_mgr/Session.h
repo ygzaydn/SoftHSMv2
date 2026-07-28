@@ -54,6 +54,7 @@
 #define SESSION_OP_DECRYPT_DIGEST	0x8
 #define SESSION_OP_SIGN_ENCRYPT		0x9
 #define SESSION_OP_DECRYPT_VERIFY	0x10
+#define SESSION_OP_MILENAGE		0x11
 
 class Session
 {
@@ -128,6 +129,14 @@ public:
 	void setSymmetricKey(SymmetricKey* inSymmetricKey);
 	SymmetricKey* getSymmetricKey();
 
+	// Milenage / 5G-AKA vendor mechanisms (WITH_MILENAGE). Holds the raw
+	// Master Storage Key value for the lifetime of a single
+	// C_SignInit..C_Sign operation; wiped by resetOp(). See
+	// doc/MILENAGE-5G-AKA-DESIGN.md.
+	void setMilenageOp(CK_MECHANISM_TYPE inMechanism, const unsigned char inMasterKey[32]);
+	CK_MECHANISM_TYPE getMilenageMechanism();
+	const unsigned char* getMilenageMasterKey();
+
 private:
 	// Constructor
 	Session();
@@ -175,6 +184,11 @@ private:
 
 	// Symmetric Crypto
 	SymmetricKey* symmetricKey;
+
+	// Milenage / 5G-AKA vendor mechanisms
+	CK_MECHANISM_TYPE milenageMechanism;
+	unsigned char milenageMasterKey[32];
+	bool milenageKeyValid;
 };
 
 #endif // !_SOFTHSM_V2_SESSION_H
