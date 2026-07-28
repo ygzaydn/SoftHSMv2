@@ -31,3 +31,19 @@ Implemented against OpenSSL EVP directly rather than SoftHSM's
 Botan/OpenSSL-selectable `CryptoFactory` abstraction, because this dev
 environment has no Botan installed. Porting onto that abstraction is
 still open — see design doc section 17.
+
+- `WireCodec.h` / `WireCodec.cpp` — TLV request/response codec for the
+  wire format in the design doc §10 (magic/version/operation
+  validation, size caps, overflow-safe TLV parsing, duplicate/unknown
+  tag rejection).
+- `MilenageService.h` / `MilenageService.cpp` — end-to-end handlers for
+  the three primary operations (`generate5gHeAv`, `resync`,
+  `provision`), the logic intended to eventually sit behind
+  `C_SignInit`/`C_Sign` for the vendor mechanisms. **Not actually wired
+  into PKCS#11 dispatch** — see design doc §17 for exactly what's
+  missing to get there (session state, output-size-query
+  short-circuit, real key-object lookup instead of a raw key buffer).
+- `test/service_selftest.cpp` — 20/20 checks passing as of the last run
+  in this session, covering provisioning round trip, AV
+  generation/response-shape, credential-binding rejection, resync
+  MAC-S rejection, and wire-parser structural rejections.

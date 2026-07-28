@@ -403,13 +403,61 @@ truncation/wrong-key/cross-subscriber-binding rejection in the envelope
 layer are exercised and pass, but these are internal round-trip tests,
 not official RFC 5649 or TS 35.208 AUTS KATs.
 
+### Commit 3 (feat: add wrapped credential mechanisms)
+Implemented and compiled/run:
+- `WireCodec.h/.cpp`: full TLV request parser and response builder for
+  the format in §10 — header/magic/version/operation validation, the
+  4096-byte request cap, integer-overflow-safe TLV length checks,
+  duplicate-tag rejection, and unknown-tag rejection (every currently
+  defined tag is treated as critical; there is no non-critical range
+  yet).
+- `MilenageService.h/.cpp`: end-to-end orchestration for all three
+  primary operations (`generate5gHeAv`, `resync`, `provision`) —
+  parses the wire request, validates/type-checks every mandatory
+  field, unwraps K/OPc via `CredentialEnvelope`, runs Milenage/5G-AKA,
+  builds the wire response, and zeroes every plaintext/intermediate
+  buffer on every exit path. `generate5gHeAv` draws RAND from OpenSSL
+  `RAND_bytes()` by default and accepts an optional caller-supplied
+  RAND parameter for deterministic testing (intended to correspond to
+  the `WITH_MILENAGE_TEST_RAND` gate once that build flag exists —
+  this module does not itself enforce the gate).
+- `test/service_selftest.cpp`: 20/20 checks pass, covering: provision
+  → wrapped K/OPc round trip; 5G HE AV response contains exactly
+  {RAND, AUTN, XRES*, KAUSF} and nothing else (explicit check that no
+  RES/CK/IK/AK/K/OPc tag leaks into the response); wrong-SUPI
+  credential rejection; fresh RAND per call; deterministic output
+  under a fixed test RAND; resync rejecting an invalid MAC-S with
+  `SIGNATURE_INVALID` and not populating a response; and wire-parser
+  structural rejections (bad magic, truncation, duplicate tag, unknown
+  critical tag, oversized request).
+
+**Still an interim deviation, carried from commit 2**: the Master
+Storage Key is a raw 32-byte buffer parameter throughout
+`MilenageService`, not a PKCS#11 key handle. `MilenageService`'s
+functions are designed to be the exact logic a `C_SignInit`/`C_Sign`
+handler for the three mechanisms would call, but no such handler
+exists — nothing here is referenced from `src/lib/SoftHSM.cpp`, whose
+mechanism dispatch was inspected (14976-line file, mechanism `switch`
+starting around line 1114) but not modified. Wiring this in requires,
+at minimum: adding the vendor mechanism IDs to whatever table drives
+`C_SignInit`'s mechanism-validity check, allocating session-level
+operation state for a pending Milenage sign operation, handling the
+output-size-query calling convention (`pSignature == NULL` must return
+only a length, per spec §15, without unwrapping anything or generating
+RAND — `MilenageService` as written always does the real work, so the
+size-query short-circuit needs to live in the dispatch layer, not
+here), rejecting `C_SignUpdate`/`C_SignFinal` for these mechanisms, and
+replacing the raw-buffer master key with SoftHSM's real key-object
+lookup so the key value is never copied out of that layer. None of
+that PKCS#11-facing work happened this session.
+
 **Not yet done, still open**: official RFC 5649 AES-KWP known-answer
 vectors, official TS 35.208 full test-vector set (sets 1-20, including
 AUTS/resync-specific vectors), official TS 33.501 Annex A XRES*/KAUSF
-KAT, PKCS#11 mechanism dispatch wiring into `SoftHSM.cpp`, Master Key
-generation/attribute-enforcement code, the CLI tool, Transport KEK,
-all CMake/Autotools build-flag wiring (`WITH_MILENAGE*`), integration
-into the CppUnit suite under `src/lib/crypto/test`, and
+KAT, the `C_SignInit`/`C_Sign` PKCS#11 dispatch wiring described above,
+Master Key generation/attribute-enforcement code, the CLI tool,
+Transport KEK, all CMake/Autotools build-flag wiring (`WITH_MILENAGE*`),
+integration into the CppUnit suite under `src/lib/crypto/test`, and
 `testing/run-open5gs-milenage-poc.sh`. Nothing in `src/lib/milenage` is
 referenced by any `CMakeLists.txt`/`Makefile.am` yet, so default
 SoftHSM builds remain unaffected.
