@@ -1,5 +1,6 @@
 #include "MilenageService.h"
 
+#include "config.h"
 #include <cstring>
 
 #include "WireCodec.h"
@@ -64,6 +65,35 @@ Error generate5gHeAv(const uint8_t *request, size_t requestLen, const uint8_t ma
     if (wrappedK.size() > SOFTHSM_MILENAGE_MAX_WRAPPED_BLOB_LEN ||
         wrappedOpc.size() > SOFTHSM_MILENAGE_MAX_WRAPPED_BLOB_LEN) {
         return Error::BAD_REQUEST;
+    }
+
+    /* Test-only caller-supplied RAND over the wire (design doc section
+     * 8 / spec section 14, WITH_MILENAGE_TEST_RAND). In a normal build
+     * this tag is not registered for the AV operation at all: its
+     * mere presence in the request is a hard parse failure, not a
+     * silently-ignored field, so a test-only wire message can never
+     * be replayed unnoticed against a production build. */
+    uint8_t wireTestRand[16];
+    bool haveWireTestRand = false;
+    {
+        std::vector<uint8_t> testRandField;
+        bool hasTag = getField(req, SOFTHSM_MILENAGE_TAG_RAND, testRandField);
+#ifdef WITH_MILENAGE_TEST_RAND
+        if (hasTag) {
+            if (testRandField.size() != milenage::RAND_LEN) {
+                return Error::BAD_REQUEST;
+            }
+            std::memcpy(wireTestRand, testRandField.data(), milenage::RAND_LEN);
+            haveWireTestRand = true;
+        }
+#else
+        if (hasTag) {
+            return Error::BAD_REQUEST;
+        }
+#endif
+    }
+    if (testRand == nullptr && haveWireTestRand) {
+        testRand = wireTestRand;
     }
 
     std::string supi = bytesToString(supiBytes);

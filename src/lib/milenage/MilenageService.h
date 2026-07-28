@@ -39,11 +39,21 @@ enum class Error {
  * request: full wire-format request buffer (design doc section 10).
  * masterKey: 32-byte raw buffer, see class-level INTERIM note.
  * response: full wire-format response buffer on Error::OK.
- * Caller-supplied RAND (testRand != nullptr, 16 bytes) is only
- * intended to be reachable when WITH_MILENAGE_TEST_RAND is enabled;
- * this module does not itself gate that build flag (no build
- * integration exists yet), so callers driving this from production
- * PKCS#11 dispatch must not pass testRand. */
+ *
+ * testRand (16 bytes, non-null) lets a direct C++ caller (e.g. the
+ * KAT tests) force a specific RAND without going through the wire
+ * protocol; it is always available at this API layer regardless of
+ * build flags. Production PKCS#11 dispatch (SoftHSM.cpp) never passes
+ * it -- RAND there always comes from SoftHSM's RNG.
+ *
+ * Independently, when built with WITH_MILENAGE_TEST_RAND, a caller
+ * may instead put a 16-byte SOFTHSM_MILENAGE_TAG_RAND field directly
+ * in the wire request; this function reads and uses it exactly like
+ * an explicit testRand argument (only if testRand itself is null). In
+ * a build without WITH_MILENAGE_TEST_RAND, the mere presence of that
+ * tag in an AV request is a hard failure (Error::BAD_REQUEST) -- it is
+ * never silently ignored, so a test-mode wire message cannot be
+ * replayed unnoticed against a production build. */
 Error generate5gHeAv(const uint8_t *request, size_t requestLen,
                       const uint8_t masterKey[32],
                       std::vector<uint8_t> &response,

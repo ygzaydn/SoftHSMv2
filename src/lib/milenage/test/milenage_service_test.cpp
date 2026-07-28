@@ -1,19 +1,18 @@
 /*
- * Standalone test for WireCodec + MilenageService, exercising the
- * three vendor operations (provision, 5G HE AV, resync) end to end
- * over the wire format, plus wire-parser rejection tests. Not wired
- * into any build system yet -- see doc/MILENAGE-5G-AKA-DESIGN.md
- * section 17. Build command mirrors standalone_selftest.cpp:
- *
- *   g++ -std=c++17 -Wall -Wextra -I.. -I../../pkcs11 \
- *       service_selftest.cpp ../WireCodec.cpp ../MilenageService.cpp \
- *       ../Milenage.cpp ../FiveGAka.cpp ../CredentialEnvelope.cpp \
- *       -lcrypto -o /tmp/milenage_service_selftest
+ * Test for WireCodec + MilenageService, exercising the three vendor
+ * operations (provision, 5G HE AV, resync) end to end over the wire
+ * format, plus wire-parser rejection tests. Built and registered with
+ * CTest via src/lib/milenage/test/CMakeLists.txt (target
+ * milenage-service-test, `ctest` name milenage-service-test); no
+ * longer standalone-buildable with a plain `g++ -lcrypto` command
+ * since MilenageService now goes through CryptoFactory (see
+ * doc/MILENAGE-5G-AKA-DESIGN.md section 17).
  */
 
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include "config.h"
 #include "../WireCodec.h"
 #include "../MilenageService.h"
 #include "../softhsm_milenage.h"
@@ -115,6 +114,35 @@ int main()
     std::vector<uint8_t> respTmp;
     CHECK(milenage_service::generate5gHeAv(avReqWrongSupi.data(), avReqWrongSupi.size(), masterKey, respTmp) ==
           milenage_service::Error::CREDENTIAL_INVALID, "generate5gHeAv rejects wrong SUPI binding");
+
+    // --- WITH_MILENAGE_TEST_RAND wire tag ---
+    uint8_t fixedRandWire[16]; for (int i = 0; i < 16; i++) fixedRandWire[i] = (uint8_t)(0x30 + i);
+    auto avReqTestRand = buildRequest(SOFTHSM_MILENAGE_OP_5G_HE_AV, {
+        {SOFTHSM_MILENAGE_TAG_SUPI, str2v(supi)},
+        {SOFTHSM_MILENAGE_TAG_WRAPPED_K, wrappedK},
+        {SOFTHSM_MILENAGE_TAG_WRAPPED_OPC, wrappedOpc},
+        {SOFTHSM_MILENAGE_TAG_SQN, std::vector<uint8_t>(sqn, sqn + 6)},
+        {SOFTHSM_MILENAGE_TAG_AMF, std::vector<uint8_t>(amf, amf + 2)},
+        {SOFTHSM_MILENAGE_TAG_SNN, str2v(snn)},
+        {SOFTHSM_MILENAGE_TAG_RAND, std::vector<uint8_t>(fixedRandWire, fixedRandWire + 16)},
+    });
+#ifdef WITH_MILENAGE_TEST_RAND
+    std::vector<uint8_t> testRandRespA, testRandRespB;
+    CHECK(milenage_service::generate5gHeAv(avReqTestRand.data(), avReqTestRand.size(), masterKey, testRandRespA) ==
+          milenage_service::Error::OK, "WITH_MILENAGE_TEST_RAND: AV request with a wire RAND tag succeeds");
+    milenage_service::generate5gHeAv(avReqTestRand.data(), avReqTestRand.size(), masterKey, testRandRespB);
+    CHECK(testRandRespA == testRandRespB,
+          "WITH_MILENAGE_TEST_RAND: identical wire RAND tag produces identical (deterministic) AV response");
+    milenage_wire::Request parsedTestRand;
+    milenage_wire::parseRequest(testRandRespA.data(), testRandRespA.size(), parsedTestRand);
+    CHECK(parsedTestRand.fields[SOFTHSM_MILENAGE_TAG_OUT_RAND] ==
+          std::vector<uint8_t>(fixedRandWire, fixedRandWire + 16),
+          "WITH_MILENAGE_TEST_RAND: response RAND matches the caller-supplied wire RAND exactly");
+#else
+    CHECK(milenage_service::generate5gHeAv(avReqTestRand.data(), avReqTestRand.size(), masterKey, respTmp) ==
+          milenage_service::Error::BAD_REQUEST,
+          "without WITH_MILENAGE_TEST_RAND: a wire RAND tag on an AV request is rejected, not silently ignored");
+#endif
 
     // Repeated call must yield a fresh RAND (RNG actually used, not fixed).
     std::vector<uint8_t> avResp2;
