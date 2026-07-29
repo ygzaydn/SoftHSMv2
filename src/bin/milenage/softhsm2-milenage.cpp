@@ -10,9 +10,13 @@
  * libsofthsm2 internals.
  *
  * Implemented subcommands: create-master-key, provision,
- * generate-5g-av, resync, inspect. NOT implemented: create-transport-kek,
- * import-transport-wrapped (the Transport KEK design in section 5.2 was
- * never implemented server-side either -- see design doc section 17).
+ * generate-5g-av, resync, inspect, import-transport-kek,
+ * import-transport-wrapped. There is no create-transport-kek: a Transport
+ * KEK generated inside the HSM would be CKA_EXTRACTABLE=FALSE from the
+ * moment it exists, so no external system could ever wrap anything under
+ * the same value -- it must be generated externally and imported (see
+ * contrib/systemd/external-scripts/ in the SoftHSMv2 repo for the
+ * external-system side of this: KEK generation and K/OPc wrapping).
  *
  * Security notes (see design doc sections 4 and 8):
  *  - No --k, --opc, or literal --pin option exists anywhere in this
@@ -248,6 +252,8 @@ struct CommonOpts {
     int pinFd = -1;
     std::string masterKeyLabel = SOFTHSM_MILENAGE_MASTER_KEY_LABEL;
     uint8_t masterKeyId = SOFTHSM_MILENAGE_MASTER_KEY_ID_BYTE;
+    std::string transportKekLabel = SOFTHSM_MILENAGE_TRANSPORT_KEK_LABEL;
+    uint8_t transportKekId = SOFTHSM_MILENAGE_TRANSPORT_KEK_ID_BYTE;
 };
 
 std::string readPin(const CommonOpts &opts)
@@ -376,9 +382,38 @@ CK_OBJECT_HANDLE findMasterKey(Pkcs11Context &ctx, const CommonOpts &opts)
     return handle;
 }
 
-std::vector<uint8_t> doSign(Pkcs11Context &ctx, CK_MECHANISM_TYPE mech, CK_OBJECT_HANDLE key, const std::vector<uint8_t> &request)
+// Looks up the Transport KEK the same way findMasterKey() looks up the
+// Master Storage Key -- by CKA_CLASS/CKA_LABEL/CKA_ID match, refusing
+// to guess if none or more than one match. Distinct key, distinct
+// label/id (--transport-kek-label/--transport-kek-id), used only for
+// CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED (see
+// import-transport-kek / import-transport-wrapped below).
+CK_OBJECT_HANDLE findTransportKek(Pkcs11Context &ctx, const CommonOpts &opts)
 {
-    CK_MECHANISM m = { mech, NULL_PTR, 0 };
+    CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &keyClass, sizeof(keyClass) },
+        { CKA_LABEL, (void*)opts.transportKekLabel.data(), (CK_ULONG)opts.transportKekLabel.size() },
+        { CKA_ID, &const_cast<CommonOpts&>(opts).transportKekId, 1 },
+    };
+    if (ctx.fl->C_FindObjectsInit(ctx.session, tmpl, 3) != CKR_OK) die("C_FindObjectsInit failed");
+    CK_OBJECT_HANDLE handle = CK_INVALID_HANDLE;
+    CK_ULONG count = 0;
+    ctx.fl->C_FindObjects(ctx.session, &handle, 1, &count);
+    CK_ULONG extraCount = 0;
+    CK_OBJECT_HANDLE extra;
+    ctx.fl->C_FindObjects(ctx.session, &extra, 1, &extraCount);
+    ctx.fl->C_FindObjectsFinal(ctx.session);
+    if (count != 1) die("expected exactly one Transport KEK matching --transport-kek-label/--transport-kek-id, "
+                         "found none or ambiguous (run import-transport-kek first)");
+    if (extraCount != 0) die("ambiguous Transport KEK match (refusing to guess)");
+    return handle;
+}
+
+std::vector<uint8_t> doSignWithParam(Pkcs11Context &ctx, CK_MECHANISM_TYPE mech, CK_OBJECT_HANDLE key,
+                                      void *pParameter, CK_ULONG parameterLen, const std::vector<uint8_t> &request)
+{
+    CK_MECHANISM m = { mech, pParameter, parameterLen };
     if (ctx.fl->C_SignInit(ctx.session, &m, key) != CKR_OK) die("C_SignInit failed (check mechanism support / key template / login)");
     CK_ULONG len = 0;
     if (ctx.fl->C_Sign(ctx.session, (CK_BYTE_PTR)request.data(), (CK_ULONG)request.size(), NULL_PTR, &len) != CKR_OK)
@@ -389,6 +424,11 @@ std::vector<uint8_t> doSign(Pkcs11Context &ctx, CK_MECHANISM_TYPE mech, CK_OBJEC
     if (rv == CKR_SIGNATURE_INVALID) die("operation failed: invalid MAC-S (resynchronization check failed)");
     if (rv != CKR_OK) die("C_Sign failed (invalid or cross-bound wrapped credential, or malformed request)");
     return resp;
+}
+
+std::vector<uint8_t> doSign(Pkcs11Context &ctx, CK_MECHANISM_TYPE mech, CK_OBJECT_HANDLE key, const std::vector<uint8_t> &request)
+{
+    return doSignWithParam(ctx, mech, key, NULL_PTR, 0, request);
 }
 
 // ---------------------------------------------------------------------
@@ -418,10 +458,18 @@ void cmdCreateMasterKey(Pkcs11Context &ctx, const CommonOpts &opts)
     CK_KEY_TYPE keyType = CKK_AES;
     CK_ULONG valueLen = SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN;
     CK_BBOOL ckTrue = CK_TRUE, ckFalse = CK_FALSE;
+    // CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED is included
+    // unconditionally (not just under WITH_MILENAGE_TRANSPORT_IMPORT):
+    // this list is baked into the key at creation time and CKA_MODIFIABLE
+    // is FALSE, so it can never be added later without recreating the
+    // Master Storage Key (and thus invalidating every already-wrapped
+    // subscriber credential under it). If the server wasn't built with
+    // that mechanism it simply won't recognize it -- harmless to list.
     CK_MECHANISM_TYPE allowed[] = {
         CKM_SOFTHSM_5G_HE_AV_WRAPPED,
         CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED,
         CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED,
+        CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED,
     };
     CK_ATTRIBUTE tmpl[] = {
         { CKA_CLASS, &keyClass, sizeof(keyClass) },
@@ -595,6 +643,107 @@ void cmdInspect(Pkcs11Context &ctx, const CommonOpts &opts)
               << "}\n";
 }
 
+// Imports an externally-generated 32-byte Transport KEK into the
+// token as a non-extractable AES-256 secret key object. The KEK's raw
+// value is never generated by this tool and never held by the HSM in
+// exportable form after this call -- it must already exist outside
+// this host (see contrib/systemd/external-scripts/generate-transport-kek.sh),
+// since the same raw value is also needed by whatever external system
+// wraps subscriber K/OPc under it before calling import-transport-wrapped.
+// Once imported, CKA_EXTRACTABLE=FALSE means this HSM can use the KEK
+// to unwrap incoming transport packages, but can never be asked to
+// hand the KEK's value back out again.
+void cmdImportTransportKek(Pkcs11Context &ctx, const CommonOpts &opts, int inputFd)
+{
+    int fd = (inputFd >= 0) ? inputFd : STDIN_FILENO;
+    std::vector<uint8_t> kek = readAllFd(fd);
+    bool locked = !kek.empty() && mlock(kek.data(), kek.size()) == 0;
+    if (kek.size() != SOFTHSM_MILENAGE_TRANSPORT_KEK_VALUE_LEN) {
+        secureWipe(kek.data(), kek.size());
+        if (locked) munlock(kek.data(), kek.size());
+        die("Transport KEK input must be exactly 32 bytes (AES-256)");
+    }
+
+    CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE keyType = CKK_AES;
+    CK_BBOOL ckTrue = CK_TRUE, ckFalse = CK_FALSE;
+    CK_MECHANISM_TYPE allowed[] = { CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED };
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &keyClass, sizeof(keyClass) },
+        { CKA_KEY_TYPE, &keyType, sizeof(keyType) },
+        { CKA_VALUE, kek.data(), (CK_ULONG)kek.size() },
+        { CKA_TOKEN, &ckTrue, sizeof(ckTrue) },
+        { CKA_PRIVATE, &ckTrue, sizeof(ckTrue) },
+        { CKA_SENSITIVE, &ckTrue, sizeof(ckTrue) },
+        { CKA_EXTRACTABLE, &ckFalse, sizeof(ckFalse) },
+        { CKA_MODIFIABLE, &ckFalse, sizeof(ckFalse) },
+        { CKA_COPYABLE, &ckFalse, sizeof(ckFalse) },
+        { CKA_SIGN, &ckTrue, sizeof(ckTrue) },
+        { CKA_ENCRYPT, &ckFalse, sizeof(ckFalse) },
+        { CKA_DECRYPT, &ckFalse, sizeof(ckFalse) },
+        { CKA_WRAP, &ckFalse, sizeof(ckFalse) },
+        { CKA_UNWRAP, &ckFalse, sizeof(ckFalse) },
+        { CKA_DERIVE, &ckFalse, sizeof(ckFalse) },
+        { CKA_LABEL, (void*)opts.transportKekLabel.data(), (CK_ULONG)opts.transportKekLabel.size() },
+        { CKA_ID, &const_cast<CommonOpts&>(opts).transportKekId, 1 },
+        { CKA_ALLOWED_MECHANISMS, allowed, sizeof(allowed) },
+    };
+    CK_OBJECT_HANDLE handle;
+    CK_RV rv = ctx.fl->C_CreateObject(ctx.session, tmpl, sizeof(tmpl)/sizeof(tmpl[0]), &handle);
+    secureWipe(kek.data(), kek.size());
+    if (locked) munlock(kek.data(), kek.size());
+    if (rv != CKR_OK) die("C_CreateObject failed (Transport KEK may already exist under this label/id)");
+    std::cout << "{\"imported\": true, \"label\": \"" << jsonEscape(opts.transportKekLabel) << "\"}\n";
+}
+
+// Submits a package that was already wrapped under the Transport KEK
+// by an external system (see contrib/systemd/external-scripts/
+// wrap-transport-package.py) and receives back K/OPc re-wrapped under
+// this token's Master Storage Key -- the same output shape `provision`
+// produces, but without this process, or any process on this host,
+// ever holding plaintext K/OPc. The HSM performs the unwrap-then-rewrap
+// internally in one PKCS#11 call (CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED);
+// see doc/MILENAGE-5G-AKA-DESIGN.md section 6.
+void cmdImportTransportWrapped(Pkcs11Context &ctx, const CommonOpts &opts, const std::string &supi,
+                                const std::string &transportWrappedKB64, const std::string &transportWrappedOpcB64,
+                                const std::string &outputPath, bool force)
+{
+    CK_OBJECT_HANDLE transportKek = findTransportKek(ctx, opts);
+    CK_OBJECT_HANDLE masterKey = findMasterKey(ctx, opts);
+
+    auto req = buildRequest(SOFTHSM_MILENAGE_OP_IMPORT_TRANSPORT, {
+        {SOFTHSM_MILENAGE_TAG_SUPI, std::vector<uint8_t>(supi.begin(), supi.end())},
+        {SOFTHSM_MILENAGE_TAG_TRANSPORT_WRAPPED_K, fromBase64(transportWrappedKB64)},
+        {SOFTHSM_MILENAGE_TAG_TRANSPORT_WRAPPED_OPC, fromBase64(transportWrappedOpcB64)},
+    });
+
+    CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS params = { masterKey };
+    std::vector<uint8_t> resp = doSignWithParam(ctx, CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED, transportKek,
+                                                 &params, sizeof(params), req);
+
+    auto fields = parseFields(resp);
+    auto wrappedK = field(fields, SOFTHSM_MILENAGE_TAG_OUT_WRAPPED_K);
+    auto wrappedOpc = field(fields, SOFTHSM_MILENAGE_TAG_OUT_WRAPPED_OPC);
+    secureWipe(resp.data(), resp.size());
+    if (wrappedK.empty() || wrappedOpc.empty()) die("import-transport-wrapped response missing wrapped K/OPc");
+
+    std::ostringstream json;
+    json << "{\n"
+         << "  \"hsm\": true,\n"
+         << "  \"wrapped_k\": \"" << toBase64(wrappedK) << "\",\n"
+         << "  \"wrapped_opc\": \"" << toBase64(wrappedOpc) << "\",\n"
+         << "  \"k\": null,\n"
+         << "  \"op\": null,\n"
+         << "  \"opc\": null\n"
+         << "}\n";
+
+    if (outputPath.empty()) {
+        std::cout << json.str();
+    } else {
+        writeOutputFile(outputPath, json.str(), force);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Argument parsing / main
 // ---------------------------------------------------------------------
@@ -607,13 +756,24 @@ void printUsage()
         "  create-master-key   Generate the token's AES-256 Master Storage Key\n"
         "  provision           Wrap plaintext K/OPc under the Master Storage Key\n"
         "                      (plaintext read only from --input-fd or stdin)\n"
+        "                      WARNING: if this build has WITH_MILENAGE_PLAINTEXT_PROVISIONING,\n"
+        "                      this command works independently of whether a Transport KEK is\n"
+        "                      configured or used -- having import-transport-wrapped working does\n"
+        "                      NOT disable this. Rebuild without that flag to remove it entirely.\n"
         "  generate-5g-av      Generate a 5G HE AV from wrapped K/OPc\n"
         "  resync              Verify AUTS and recover SQN_MS\n"
         "  inspect             Report non-secret info about the Master Storage Key\n"
+        "  import-transport-kek     Import an externally-generated Transport KEK\n"
+        "                            (32 raw bytes, from --input-fd or stdin)\n"
+        "  import-transport-wrapped Submit K/OPc wrapped under the Transport KEK by\n"
+        "                            an external system; returns K/OPc re-wrapped\n"
+        "                            under the Master Storage Key (production path;\n"
+        "                            see contrib/systemd/external-scripts/)\n"
         "common options:\n"
         "  --module <path> --token-label <label> --token-serial <serial>\n"
         "  --slot-id <id> --pin-file <path> --pin-fd <fd>\n"
         "  --master-key-label <label> --master-key-id <hex-byte>\n"
+        "  --transport-kek-label <label> --transport-kek-id <hex-byte>\n"
         "provision options (development/PoC only -- requires a build with\n"
         "  WITH_MILENAGE_PLAINTEXT_PROVISIONING; prefer import-transport-wrapped):\n"
         "  --supi <imsi-...> --input-fd <fd> --output <path> --force\n"
@@ -622,6 +782,11 @@ void printUsage()
         "  --supi <imsi-...> --wrapped-k <base64> --wrapped-opc <base64>\n"
         "  --sqn <hex12> --amf <hex4> --snn <string>   (generate-5g-av)\n"
         "  --rand <hex32> --auts <hex28>                (resync)\n"
+        "import-transport-kek options:\n"
+        "  --input-fd <fd>   (32 raw bytes; stdin if omitted)\n"
+        "import-transport-wrapped options:\n"
+        "  --supi <imsi-...> --transport-wrapped-k <base64> --transport-wrapped-opc <base64>\n"
+        "  --output <path> --force\n"
         "No --k, --opc, or literal --pin option exists in this tool.\n";
 }
 
@@ -642,6 +807,7 @@ int main(int argc, char **argv)
 
     CommonOpts opts;
     std::string supi, wrappedK, wrappedOpc, sqnHex, amfHex, snn, randHex, autsHex, outputPath;
+    std::string transportWrappedK, transportWrappedOpc;
     int inputFd = -1;
     bool force = false;
     bool allowPlaintextTestProvisioning = false;
@@ -656,6 +822,10 @@ int main(int argc, char **argv)
         else if (a == "--pin-fd") opts.pinFd = (int)strtol(requireArg(argc, argv, i).c_str(), nullptr, 10);
         else if (a == "--master-key-label") opts.masterKeyLabel = requireArg(argc, argv, i);
         else if (a == "--master-key-id") opts.masterKeyId = (uint8_t)strtol(requireArg(argc, argv, i).c_str(), nullptr, 16);
+        else if (a == "--transport-kek-label") opts.transportKekLabel = requireArg(argc, argv, i);
+        else if (a == "--transport-kek-id") opts.transportKekId = (uint8_t)strtol(requireArg(argc, argv, i).c_str(), nullptr, 16);
+        else if (a == "--transport-wrapped-k") transportWrappedK = requireArg(argc, argv, i);
+        else if (a == "--transport-wrapped-opc") transportWrappedOpc = requireArg(argc, argv, i);
         else if (a == "--supi") supi = requireArg(argc, argv, i);
         else if (a == "--wrapped-k") wrappedK = requireArg(argc, argv, i);
         else if (a == "--wrapped-opc") wrappedOpc = requireArg(argc, argv, i);
@@ -701,8 +871,17 @@ int main(int argc, char **argv)
         cmdResync(ctx, opts, supi, wrappedK, wrappedOpc, randHex, autsHex);
     } else if (command == "inspect") {
         cmdInspect(ctx, opts);
-    } else if (command == "create-transport-kek" || command == "import-transport-wrapped") {
-        die("command '" + command + "' is not implemented (Transport KEK was never implemented server-side; see doc/MILENAGE-5G-AKA-DESIGN.md section 17)");
+    } else if (command == "import-transport-kek") {
+        cmdImportTransportKek(ctx, opts, inputFd);
+    } else if (command == "import-transport-wrapped") {
+        if (supi.empty() || transportWrappedK.empty() || transportWrappedOpc.empty())
+            die("--supi, --transport-wrapped-k, --transport-wrapped-opc are all required");
+        cmdImportTransportWrapped(ctx, opts, supi, transportWrappedK, transportWrappedOpc, outputPath, force);
+    } else if (command == "create-transport-kek") {
+        die("command 'create-transport-kek' does not exist -- generating a Transport KEK inside the "
+            "HSM would make it CKA_EXTRACTABLE=FALSE immediately, so no external system could ever "
+            "wrap anything with the same value. Generate the KEK externally and use 'import-transport-kek' "
+            "instead (see contrib/systemd/external-scripts/generate-transport-kek.sh).");
     } else {
         printUsage();
         return 2;

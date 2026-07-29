@@ -1,5 +1,5 @@
-# Copy to /etc/softhsm2/softhsm2.conf (root:softhsm, mode 640).
-directories.tokendir = /var/lib/softhsm2/tokens
+# Copied to /opt/softhsm2-milenaged/config/softhsm2.conf (root:softhsm, mode 640).
+directories.tokendir = /opt/softhsm2-milenaged/tokens
 objectstore.backend = file
 log.level = INFO
 slots.removable = false

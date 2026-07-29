@@ -1,6 +1,5 @@
 [Unit]
 Description=SoftHSM Milenage 5G-AKA TCP daemon (S5GM)
-Documentation=file:/home/aselsan/SoftHSMv2/doc/MILENAGE-5G-AKA-DESIGN.md
 After=network-online.target
 Wants=network-online.target
 
@@ -9,21 +8,29 @@ Type=simple
 User=softhsm
 Group=softhsm
 
-EnvironmentFile=/etc/softhsm2/milenaged.env
-Environment=SOFTHSM2_CONF=/etc/softhsm2/softhsm2.conf
+EnvironmentFile=/opt/softhsm2-milenaged/config/milenaged.env
+Environment=SOFTHSM2_CONF=/opt/softhsm2-milenaged/config/softhsm2.conf
 
 ExecStart=/usr/local/bin/softhsm2-milenaged \
     --module /usr/local/lib/softhsm/libsofthsm2.so \
     --token-label ${TOKEN_LABEL} \
-    --pin-file /etc/softhsm2/milenaged-pin \
+    --pin-file /opt/softhsm2-milenaged/config/milenaged-pin \
     --listen-addr ${LISTEN_ADDR} \
     --listen-port ${LISTEN_PORT}
 
 Restart=on-failure
 RestartSec=2s
 
-# Hardening. The daemon only needs: read its PIN file and softhsm2.conf,
-# read/write the token store, and listen on a TCP socket -- nothing else.
+# On every stop (manual stop, restart, or crash-restart), archive the
+# current log under a timestamped name instead of truncating/losing it.
+# A separate script file is used (rather than an inline `bash -c '...'`)
+# because systemd's own Exec*= argv parser does not treat single quotes
+# as quoting -- an inline single-quoted shell script gets word-split by
+# systemd itself before bash ever sees it.
+ExecStopPost=/usr/local/bin/softhsm2-milenaged-rotate-log
+
+# Hardening. The daemon only needs: read its config/PIN, read/write the
+# token store and its own logs, and listen on a TCP socket -- nothing else.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -36,13 +43,15 @@ RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/var/lib/softhsm2
 
-# LogsDirectory= creates /var/log/softhsm (owned by User=/Group= above)
-# before the daemon starts, and it's covered by ProtectSystem=strict.
-LogsDirectory=softhsm
-StandardOutput=append:/var/log/softhsm/softhsm2-milenaged.log
-StandardError=append:/var/log/softhsm/softhsm2-milenaged.log
+# install.sh creates /opt/softhsm2-milenaged/{tokens,logs} up front with
+# the right ownership, so these paths are guaranteed to exist before
+# ExecStart runs -- unlike LogsDirectory=, which was observed to not
+# always be honored before ExecStart on every systemd version/config.
+ReadWritePaths=/opt/softhsm2-milenaged/tokens /opt/softhsm2-milenaged/logs
+
+StandardOutput=append:/opt/softhsm2-milenaged/logs/softhsm2-milenaged.log
+StandardError=append:/opt/softhsm2-milenaged/logs/softhsm2-milenaged.log
 
 [Install]
 WantedBy=multi-user.target

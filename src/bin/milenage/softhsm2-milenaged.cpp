@@ -72,6 +72,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <sys/time.h>
+#include <ctime>
 
 #define CK_PTR *
 #define CK_DEFINE_FUNCTION(returnType, name) returnType name
@@ -93,9 +95,30 @@ void die(const std::string &msg)
     std::exit(1);
 }
 
+// Formats "MM/DD HH:MM:SS.mmm", matching the timestamp style used by
+// Open5GS's own logs (ogs_log), so operators correlating the UDM log
+// with this daemon's log can read timestamps the same way in both.
+std::string logTimestamp()
+{
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    struct tm tmv;
+    localtime_r(&tv.tv_sec, &tmv);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d/%02d %02d:%02d:%02d.%03d",
+             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+             (int)(tv.tv_usec / 1000));
+    return buf;
+}
+
+// ANSI colors, matching Open5GS's own ogs_log style: green timestamp,
+// yellow component tag, bold green INFO level -- so this daemon's log
+// reads the same way side-by-side with the UDM log it's paired with.
 void logInfo(const std::string &msg)
 {
-    std::cerr << "softhsm2-milenaged: " << msg << "\n";
+    std::cerr << "\033[32m" << logTimestamp() << "\033[0m"
+               << ": [\033[33msoft-hsm\033[0m] \033[1;32mINFO\033[0m: "
+               << msg << "\n";
 }
 
 // ---------------------------------------------------------------------
