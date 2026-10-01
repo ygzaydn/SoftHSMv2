@@ -10,6 +10,7 @@
 #   config   -> /opt/softhsm2/etc/{softhsm2.conf,gsm.env,gsm-pin}
 #   tokens   -> /opt/softhsm2/tokens
 #   logs     -> /opt/softhsm2/logs/softhsm-gsm.log
+#   tools    -> /opt/softhsm2/sbin/hsm.sh (+ lib/daemon_client.py)
 #   service  -> softhsm system user, softhsm2-gsm.service
 #
 # Must be run as root (sudo). Safe to re-run (idempotent where possible;
@@ -46,6 +47,7 @@ BASE_DIR=/opt/softhsm2
 CONFIG_DIR="$BASE_DIR/etc"
 TOKEN_DIR="$BASE_DIR/tokens"
 LOG_DIR="$BASE_DIR/logs"
+SBIN_DIR="$BASE_DIR/sbin"
 REAL_CLI=/usr/local/bin/softhsm2-milenage
 UTIL=/usr/local/bin/softhsm2-util
 MODULE=/usr/local/lib/softhsm/libsofthsm2.so
@@ -105,8 +107,8 @@ if ! getent passwd softhsm >/dev/null; then
         --shell /usr/sbin/nologin --comment "SoftHSM Milenage daemon" softhsm
 fi
 
-echo "==> creating $BASE_DIR (config, tokens, logs)"
-mkdir -p "$CONFIG_DIR" "$TOKEN_DIR" "$LOG_DIR"
+echo "==> creating $BASE_DIR (config, tokens, logs, sbin)"
+mkdir -p "$CONFIG_DIR" "$TOKEN_DIR" "$LOG_DIR" "$BASE_DIR/wrapped" "$BASE_DIR/pids" "$SBIN_DIR/lib"
 chown root:softhsm "$BASE_DIR"
 chmod 750 "$BASE_DIR"
 chown root:softhsm "$CONFIG_DIR"
@@ -118,6 +120,12 @@ chmod 750 "$TOKEN_DIR"
 # before ExecStart runs.
 chown softhsm:softhsm "$LOG_DIR"
 chmod 750 "$LOG_DIR"
+chown root:softhsm "$BASE_DIR/wrapped" "$BASE_DIR/pids"
+chmod 770 "$BASE_DIR/wrapped" "$BASE_DIR/pids"
+chown root:softhsm "$SBIN_DIR" "$SBIN_DIR/lib"
+chmod 750 "$SBIN_DIR" "$SBIN_DIR/lib"
+install -o root -g softhsm -m 750 "$SCRIPT_DIR/sbin/hsm.sh" "$SBIN_DIR/hsm.sh"
+install -o root -g softhsm -m 640 "$SCRIPT_DIR/sbin/lib/daemon_client.py" "$SBIN_DIR/lib/daemon_client.py"
 
 if [ ! -f "$CONFIG_DIR/softhsm2.conf" ]; then
     install -o root -g softhsm -m 640 \
@@ -289,6 +297,7 @@ Done. Everything for this service lives under $BASE_DIR:
   PIN:     $CONFIG_DIR/gsm-pin  (root:softhsm, mode 640)
   tokens:  $TOKEN_DIR     (softhsm:softhsm)
   logs:    $LOG_DIR/softhsm-gsm.log
+  tools:   $SBIN_DIR/hsm.sh
   wrapper: softhsm2 --help
   service: systemctl {status,restart,stop} softhsm2-gsm
 

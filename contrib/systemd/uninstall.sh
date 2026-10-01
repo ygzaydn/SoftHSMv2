@@ -78,8 +78,8 @@ else
 fi
 
 if [ "$KEEP_TOKENS" -eq 1 ]; then
-    echo "==> --keep-tokens given: removing config and logs, leaving $TOKEN_DIR in place"
-    rm -rf "$BASE_DIR/etc" "$BASE_DIR/logs"
+    echo "==> --keep-tokens given: removing config, logs and tools, leaving $TOKEN_DIR in place"
+    rm -rf "$BASE_DIR/etc" "$BASE_DIR/logs" "$BASE_DIR/sbin" "$BASE_DIR/pids"
 else
     if [ -d "$TOKEN_DIR" ] && [ -n "$(ls -A "$TOKEN_DIR" 2>/dev/null)" ]; then
         if [ "$ASSUME_YES" -ne 1 ]; then
@@ -95,8 +95,8 @@ else
         fi
     fi
     if [ "$KEEP_TOKENS" -eq 1 ]; then
-        echo "==> removing config and logs, leaving $TOKEN_DIR in place"
-        rm -rf "$BASE_DIR/etc" "$BASE_DIR/logs"
+        echo "==> removing config, logs and tools, leaving $TOKEN_DIR in place"
+        rm -rf "$BASE_DIR/etc" "$BASE_DIR/logs" "$BASE_DIR/sbin" "$BASE_DIR/pids"
     else
         echo "==> removing $BASE_DIR"
         rm -rf "$BASE_DIR"

@@ -20,6 +20,7 @@ What this package sets up:
 - config under `/opt/softhsm2/etc/` (`softhsm2.conf`, `gsm.env`, `gsm-pin`)
 - token store under `/opt/softhsm2/tokens/`
 - logs under `/opt/softhsm2/logs/softhsm-gsm.log`
+- HSM management script under `/opt/softhsm2/sbin/hsm.sh` (with its helper in `sbin/lib/`)
 - `Restart=on-failure`, starts on boot (`systemctl enable`)
 - sandboxed via systemd hardening directives (`ProtectSystem=strict`,
   `NoNewPrivileges`, `PrivateDevices`, etc.)
