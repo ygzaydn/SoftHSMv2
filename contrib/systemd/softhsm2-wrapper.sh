@@ -8,7 +8,7 @@
 #   softhsm2 --help
 #   softhsm2 create-master-key
 #   softhsm2 inspect
-#   softhsm2 provision --supi <imsi-...> --input-fd 0 --output <path> \
+#   Development builds only: softhsm2 provision --supi <imsi-...> --input-fd 0 --output <path> \
 #       --allow-plaintext-test-provisioning [< raw-K-then-OPc-bytes]
 #   softhsm2 generate-5g-av --supi <imsi-...> --wrapped-k <b64> \
 #       --wrapped-opc <b64> --sqn <hex12> --amf <hex4> --snn <string>

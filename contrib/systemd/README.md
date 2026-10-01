@@ -21,6 +21,7 @@ What this package sets up:
 - reference templates under `/opt/softhsm2/etc/` (`softhsm2.conf.example`, `gsm.env.example`)
 - token store under `/opt/softhsm2/tokens/`
 - logs under `/opt/softhsm2/logs/softhsm-gsm.log`
+- PKCS#11 library logs under `/opt/softhsm2/logs/softhsm-pkcs11.log`
 - HSM management script under `/opt/softhsm2/sbin/hsm.sh` (with its helper in `sbin/lib/`)
 - `Restart=on-failure`, starts on boot (`systemctl enable`)
 - sandboxed via systemd hardening directives (`ProtectSystem=strict`,
@@ -63,8 +64,8 @@ token directory, User PIN file, and any wrapped credential files securely;
 use the migration options below for the token and PIN. Keep the token,
 Master Storage Key, PIN, and wrapped subscriber data together.
 
-It builds the current source tree itself (configuring on first run,
-rebuilding on every run) and installs the binaries/PKCS#11 module into
+It builds the current source tree itself (reconfiguring and rebuilding
+on every run) and installs the binaries/PKCS#11 module into
 `/usr/local`, creates the `softhsm` system user, and writes default
 config into `/opt/softhsm2/etc/` (without overwriting
 anything already there). On a fresh token store it also **prompts you**
@@ -76,11 +77,11 @@ afterwards. It installs the `softhsm2` wrapper command and installs,
 enables, and starts the systemd unit.
 
 The installer also refreshes `softhsm2.conf.example` and `gsm.env.example`
-in `/opt/softhsm2/etc/`. It never changes an existing active config.
-If an older install logs `Missing objectstore.umask` or
-`Missing slots.mechanisms`, add the values shown in the example to its
-active `softhsm2.conf`. `Missing log.file` is harmless: SoftHSM uses
-syslog when that optional setting is absent.
+in `/opt/softhsm2/etc/`. On an existing install, it adds missing
+`objectstore.umask`, `slots.mechanisms`, and `log.file` settings to the
+active `softhsm2.conf` without changing values already present. SoftHSM's
+PKCS#11 library writes to `softhsm-pkcs11.log`; systemd captures daemon
+stdout and stderr in `softhsm-gsm.log`.
 
 Moving an existing token from another install of this same daemon (a
 different host, or a prior standalone setup)? Pass
@@ -145,13 +146,16 @@ sudo ./uninstall.sh
 
 Stops and removes the systemd unit, the `softhsm2` wrapper, the
 installed binaries/PKCS#11 module, `/opt/softhsm2/etc`, `/opt/softhsm2/logs`,
-and the `softhsm` system user/group. It prompts before deleting
+and the `softhsm` system user/group. It uses the installed file manifest
+even if `build/` has been deleted. It prompts before deleting
 `/opt/softhsm2/tokens` (the token store) since that destroys the Master
 Storage Key and makes every subscriber's wrapped credentials
 unrecoverable — pass `--keep-tokens` to preserve it (e.g. before
 reinstalling, or to migrate it elsewhere with
 `install.sh --migrate-from-token-dir`), or `--yes` to skip the prompt in
-a non-interactive script.
+a non-interactive script. With `--keep-tokens`, it also keeps the
+`softhsm` account and any wrapped credential files so ownership is
+preserved for a later reinstall.
 
 ## Security notes
 

@@ -93,7 +93,8 @@ cd "$HSM_BUILD"
 
 cmake -DWITH_CRYPTO_BACKEND=openssl \
       -DWITH_MILENAGE=ON \
-      -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=ON \
+      -DWITH_MILENAGE_TEST_RAND=OFF \
+      -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF \
       -DWITH_MILENAGE_TRANSPORT_IMPORT=ON \
       "$HSM_REPO"
 
@@ -686,7 +687,7 @@ No	Command	Purpose
 		Example: ./hsm.sh build
 3	init-token	Initialize a token and create its Master Storage Key.
 		Example: ./hsm.sh init-token
-4	provision	Development only: wrap K/OPc and update MongoDB.
+4	provision	Development only (disabled by installed build): wrap K/OPc and update MongoDB.
 		Example: ./hsm.sh provision 999700000012345 <K-hex> <OPc-hex> --force
 5	generate-av	Generate a local 5G authentication vector.
 		Example: ./hsm.sh generate-av 999700000012345

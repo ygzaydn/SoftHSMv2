@@ -15,21 +15,19 @@ sudo ./install.sh
 ```
 
 `install.sh` builds the current source tree itself — you don't need to
-build first. On first run (no `build/` yet) it configures with:
+build first. On every run it configures with:
 
 | Flag | Purpose |
 | --- | --- |
 | `WITH_CRYPTO_BACKEND=openssl` | crypto backend for AES-KWP/CMAC used by Milenage wrapping. |
 | `WITH_MILENAGE=ON` | required — builds the Milenage/5G-AKA vendor mechanisms, the `softhsm2-milenage` CLI, and `softhsm-gsm`. |
-| `WITH_MILENAGE_PLAINTEXT_PROVISIONING=ON` | **on by default** — enables the `provision` command (step 4 below), which stays available even after you're using the production Transport KEK flow (step 5). See "Locking this down" at the end of step 4 to turn it off once you no longer need it. |
+| `WITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF` | Disables the development-only plaintext `provision` command. Use transport-wrapped import (step 5). |
 | `WITH_MILENAGE_TRANSPORT_IMPORT=ON` | required for the Transport KEK / `import-transport-wrapped` flow (step 5). |
+| `WITH_MILENAGE_TEST_RAND=OFF` | Uses the normal random source for RAND generation. |
 
-On every run (including re-runs) it rebuilds (`make`) before installing,
-so you always get the current source tree. It never passes
-`-DWITH_MILENAGE_TEST_RAND=ON` — don't add that yourself on a build you
-intend to run against real subscribers; it replaces the RNG used for
-RAND generation with a deterministic test source and only exists for
-the SoftHSMv2 test suite.
+On every run (including re-runs) it reconfigures and rebuilds before
+installing, so a previously cached development build cannot silently
+leave plaintext provisioning or deterministic test RAND enabled.
 
 It then installs:
 
@@ -41,8 +39,9 @@ It then installs:
   you don't have to pass `--module`/`--token-label`/`--pin-file` on
   every call
 - a dedicated `softhsm` system user/group
-- `/opt/softhsm2/etc/{softhsm2.conf,gsm.env,gsm-pin}` (written
-  only if they don't already exist)
+- `/opt/softhsm2/etc/{softhsm2.conf,gsm.env,gsm-pin}` (active config
+  generated from the checked-in examples; existing values are preserved,
+  with missing SoftHSM defaults added)
 - the `softhsm2-gsm.service` systemd unit, installed, enabled, and
   started
 
@@ -130,15 +129,10 @@ wrapped under this key.
 
 ## 4) Onboard a subscriber (provision wrapped K/OPc)
 
-**This path is currently enabled on any host installed by `install.sh`.**
-`install.sh` builds with `WITH_MILENAGE_PLAINTEXT_PROVISIONING=ON` by
-default (see step 0), so `softhsm2 provision` works even after you've
-set up and are using the Transport KEK flow (step 5) — having the
-production path working does **not** disable the plaintext one. Anyone
-with `sudo` on this host can still run the command below to onboard a
-subscriber by typing its plaintext K/OPc directly into this host's
-shell. If you want that to stop being possible, see "Locking this down"
-at the end of this section.
+**This development-only path is disabled by the installer.** Use the
+transport-wrapped import flow in step 5 on an installed host. The
+example below requires a separate development build configured with
+`WITH_MILENAGE_PLAINTEXT_PROVISIONING=ON`.
 
 Wraps a subscriber's plaintext K/OPc under the Master Storage Key and
 writes the resulting `wrapped_k`/`wrapped_opc` (base64) to a JSON file.
@@ -174,29 +168,10 @@ For production onboarding, use the transport-wrapped import flow (step
 5 below) instead — it never exposes K/OPc in plaintext to any process
 on this host.
 
-### Locking this down: disabling plaintext provisioning entirely
-
-Once you've validated the Transport KEK flow (step 5) and no longer
-need `provision`, remove the capability from the binary itself — not
-just by avoiding the command, since anyone with `sudo` can still run
-it as long as the build supports it:
-
-```bash
-cd build
-cmake -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF .
-cd ..
-sudo env HSM_REPO="$PWD" ../open5gs-scripts/hsm-scripts/install.sh
-```
-
-After this, `softhsm2 provision` fails immediately with "this build
-does not include plaintext provisioning" — regardless of flags, PIN, or
-`sudo` access — because the code path doesn't exist in the binary at
-all, not because of a runtime check that could be bypassed. This is a
-one-way decision on this build (re-enabling it means rebuilding with
-the flag back on); it doesn't affect subscribers already onboarded
-either way, since `provision` and `import-transport-wrapped` produce
-the same `wrapped_k`/`wrapped_opc` shape and existing wrapped
-credentials in the database aren't touched by a rebuild.
+`softhsm2 provision` fails with "this build does not include plaintext
+provisioning" on the installed build. Reconfiguring the source with
+that option enabled is for isolated development only; running
+`install.sh` again restores the production default.
 
 ## 5) Production onboarding (Transport KEK, `import-transport-wrapped`)
 
@@ -465,9 +440,9 @@ sudo ./uninstall.sh
 ```
 
 This stops and removes the systemd unit, the `softhsm2` wrapper, the
-binaries and PKCS#11 module (using `build/install_manifest.txt` if it
-exists, so only files this build actually installed are removed), and
-the `softhsm` system user and group. It always removes
+binaries and PKCS#11 module (using the installed manifest under
+`/opt/softhsm2/etc/`, even if `build/` was deleted), and
+the `softhsm` system user and group on a full uninstall. It always removes
 `/opt/softhsm2/etc` and `/opt/softhsm2/logs`
 without prompting (config is regenerated on reinstall; logs aren't
 meant to outlive the service). It prompts before deleting
@@ -481,7 +456,8 @@ sudo ./uninstall.sh --yes           # don't prompt before deleting it
 
 `--keep-tokens` is what you want before reinstalling on the same host,
 or before migrating the token store elsewhere with
-`install.sh --migrate-from-token-dir`.
+`install.sh --migrate-from-token-dir`. It also retains the `softhsm`
+account and wrapped credential files, preserving their ownership.
 
 ## Configuration reference
 
@@ -495,12 +471,13 @@ else needs to be tracked or backed up separately.
 | `/usr/local/bin/softhsm2` | the wrapper described in step 0 — the only command you're expected to type by hand. | you. |
 | `/usr/local/bin/softhsm-gsm-rotate-log` | archives the log file on every service stop (see step 7). Not meant to be run by hand. | the systemd unit (`ExecStopPost=`). |
 | `/usr/local/lib/softhsm/libsofthsm2.so` | PKCS#11 module. | both binaries above, path is baked into the `softhsm2` wrapper and the systemd unit. |
-| `/opt/softhsm2/etc/softhsm2.conf` | `directories.tokendir`, `objectstore.backend`, `log.level`, `slots.removable`. | every PKCS#11 client (`softhsm2-util`, `softhsm2-milenage`, `softhsm-gsm`) via `SOFTHSM2_CONF`. |
+| `/opt/softhsm2/etc/softhsm2.conf` | Token directory, object store permissions, log file, and mechanism settings. | every PKCS#11 client (`softhsm2-util`, `softhsm2-milenage`, `softhsm-gsm`) via `SOFTHSM2_CONF`. |
 | `/opt/softhsm2/etc/gsm.env` | `TOKEN_LABEL`, `LISTEN_ADDR`, `LISTEN_PORT`. | the systemd unit (`EnvironmentFile=`) and the `softhsm2` wrapper (sourced directly, so both always agree on the token label). |
 | `/opt/softhsm2/etc/gsm-pin` | the token's user PIN, plaintext, mode `640`, owner `root:softhsm`. | the systemd unit and the `softhsm2` wrapper. Never printed, logged, or accepted as a command-line argument. |
 | `/opt/softhsm2/tokens/` | the actual token: Master Storage Key, Transport KEK (if imported), and every subscriber's wrapped K/OPc. | `softhsm-gsm`, `softhsm2` wrapper commands — this directory is the one thing worth backing up. |
 | `/opt/softhsm2/etc/transport-kek` | the raw 32-byte Transport KEK (see step 5) — NOT created by `install.sh`, only by `external-scripts/generate-transport-kek.sh`. Mode 600, owner `root:root` (not `softhsm`) — the daemon has no need for it. | `external-scripts/wrap-transport-package.py`, and whatever imported it into the token once via `softhsm2 import-transport-kek`. |
 | `/opt/softhsm2/logs/softhsm-gsm.log` | daemon operational log (see step 7). | you, via `tail`/`journalctl`. |
+| `/opt/softhsm2/logs/softhsm-pkcs11.log` | PKCS#11 library log; rotated separately from daemon stdout/stderr. | every PKCS#11 client through `log.file` in `softhsm2.conf`. |
 
 ### Why `--module` isn't something you set
 

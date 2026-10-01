@@ -31,6 +31,7 @@ add_test(NAME milenage-service-test COMMAND milenage-service-test)
 # --- Real PKCS#11-level tests: dlopen the built module, no link
 # against libsofthsm2 internals. Run through a wrapper script that
 # initializes an isolated token in a temp directory per invocation. ---
+if(WITH_MILENAGE_PLAINTEXT_PROVISIONING)
 add_executable(milenage-pkcs11-e2e-test pkcs11_e2e_test.cpp)
 target_compile_options(milenage-pkcs11-e2e-test PRIVATE ${COMPILE_OPTIONS})
 target_link_libraries(milenage-pkcs11-e2e-test ${CMAKE_DL_LIBS})
@@ -54,6 +55,7 @@ add_test(NAME milenage-pkcs11-restart-test
                  $<TARGET_FILE:softhsm2-util>
                  $<TARGET_FILE:milenage-pkcs11-restart-test>
          )
+endif()
 
 if(WITH_MILENAGE_PLAINTEXT_PROVISIONING)
     # The daemon test's provisioning step (done locally via

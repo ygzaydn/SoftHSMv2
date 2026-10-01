@@ -3,6 +3,6 @@ directories.tokendir = /opt/softhsm2/tokens
 objectstore.backend = file
 objectstore.umask = 0077
 log.level = INFO
+log.file = /opt/softhsm2/logs/softhsm-pkcs11.log
 slots.removable = false
 slots.mechanisms = ALL
-# log.file is intentionally omitted: SoftHSM uses syslog by default.

@@ -27,6 +27,17 @@
     copytruncate
 }
 
+# The PKCS#11 library also holds this file open while the daemon runs.
+/opt/softhsm2/logs/softhsm-pkcs11.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
 /opt/softhsm2/logs/softhsm-gsm-*.log {
     weekly
     maxage 30

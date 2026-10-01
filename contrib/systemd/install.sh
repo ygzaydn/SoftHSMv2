@@ -76,13 +76,12 @@ fi
 
 echo "==> configuring and building SoftHSMv2 (latest source tree)"
 mkdir -p "$BUILD_DIR"
-if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
-    (cd "$BUILD_DIR" && cmake -DWITH_CRYPTO_BACKEND=openssl \
-        -DWITH_MILENAGE=ON \
-        -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=ON \
-        -DWITH_MILENAGE_TRANSPORT_IMPORT=ON \
-        "$REPO_ROOT")
-fi
+cmake -S "$REPO_ROOT" -B "$BUILD_DIR" \
+    -DWITH_CRYPTO_BACKEND=openssl \
+    -DWITH_MILENAGE=ON \
+    -DWITH_MILENAGE_TEST_RAND=OFF \
+    -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF \
+    -DWITH_MILENAGE_TRANSPORT_IMPORT=ON
 (cd "$BUILD_DIR" && make -j"$(nproc)")
 
 if [ ! -x "$BUILD_DIR/src/bin/milenage/softhsm-gsm" ]; then
@@ -113,6 +112,8 @@ chown root:softhsm "$BASE_DIR"
 chmod 750 "$BASE_DIR"
 chown root:softhsm "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
+install -o root -g softhsm -m 640 \
+    "$BUILD_DIR/install_manifest.txt" "$CONFIG_DIR/install-manifest.txt"
 chown softhsm:softhsm "$TOKEN_DIR"
 chmod 750 "$TOKEN_DIR"
 # Created explicitly (not left to the unit's ReadWritePaths= alone)
@@ -120,6 +121,11 @@ chmod 750 "$TOKEN_DIR"
 # before ExecStart runs.
 chown softhsm:softhsm "$LOG_DIR"
 chmod 750 "$LOG_DIR"
+# The PKCS#11 library opens this file as the service user. Keep it separate
+# from systemd's StandardOutput= file, which systemd itself owns and opens.
+if [ ! -e "$LOG_DIR/softhsm-pkcs11.log" ]; then
+    install -o softhsm -g softhsm -m 660 /dev/null "$LOG_DIR/softhsm-pkcs11.log"
+fi
 chown root:softhsm "$BASE_DIR/wrapped" "$BASE_DIR/pids"
 chmod 770 "$BASE_DIR/wrapped" "$BASE_DIR/pids"
 chown root:softhsm "$SBIN_DIR" "$SBIN_DIR/lib"
@@ -142,8 +148,21 @@ if [ ! -f "$CONFIG_DIR/softhsm2.conf" ]; then
         "$SCRIPT_DIR/softhsm2.conf.example" "$CONFIG_DIR/softhsm2.conf"
     echo "    wrote $CONFIG_DIR/softhsm2.conf"
 else
-    echo "    $CONFIG_DIR/softhsm2.conf already exists, not overwriting"
+    echo "    $CONFIG_DIR/softhsm2.conf already exists; preserving existing settings"
 fi
+
+# Older installs may have an active config with only four keys. Add just
+# missing defaults; never replace a setting chosen by the host admin.
+append_config_default() {
+    local pattern="$1" line="$2"
+    if ! grep -Eq "$pattern" "$CONFIG_DIR/softhsm2.conf"; then
+        printf '\n%s\n' "$line" >> "$CONFIG_DIR/softhsm2.conf"
+        echo "    added $line"
+    fi
+}
+append_config_default '^[[:space:]]*objectstore[.]umask[[:space:]]*=' 'objectstore.umask = 0077'
+append_config_default '^[[:space:]]*slots[.]mechanisms[[:space:]]*=' 'slots.mechanisms = ALL'
+append_config_default '^[[:space:]]*log[.]file[[:space:]]*=' 'log.file = /opt/softhsm2/logs/softhsm-pkcs11.log'
 
 TOKEN_LABEL="open5gs-milenage"
 LISTEN_ADDR="127.0.0.1"
@@ -158,14 +177,20 @@ if [ ! -f "$CONFIG_DIR/gsm.env" ]; then
     else
         echo "    no TTY attached -- using defaults (label=$TOKEN_LABEL, $LISTEN_ADDR:$LISTEN_PORT)"
     fi
-    {
-        echo "# Written by install.sh. See gsm.env.example for a description"
-        echo "# of these settings."
-        echo "TOKEN_LABEL=$TOKEN_LABEL"
-        echo "LISTEN_ADDR=$LISTEN_ADDR"
-        echo "LISTEN_PORT=$LISTEN_PORT"
-        echo "LISTEN_UNIX=/run/softhsm-gsm/gsm.sock"
-    } > "$CONFIG_DIR/gsm.env"
+    if [[ ! "$TOKEN_LABEL" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+       [[ ! "$LISTEN_ADDR" =~ ^[A-Za-z0-9.:-]+$ ]] ||
+       [[ ! "$LISTEN_PORT" =~ ^[0-9]+$ ]] ||
+       [ "$LISTEN_PORT" -lt 1 ] || [ "$LISTEN_PORT" -gt 65535 ]; then
+        echo "error: invalid token label, listen address, or port" >&2
+        exit 1
+    fi
+    install -o root -g softhsm -m 640 \
+        "$SCRIPT_DIR/gsm.env.example" "$CONFIG_DIR/gsm.env"
+    sed -i \
+        -e "s|^TOKEN_LABEL=.*|TOKEN_LABEL=$TOKEN_LABEL|" \
+        -e "s|^LISTEN_ADDR=.*|LISTEN_ADDR=$LISTEN_ADDR|" \
+        -e "s|^LISTEN_PORT=.*|LISTEN_PORT=$LISTEN_PORT|" \
+        "$CONFIG_DIR/gsm.env"
     chown root:softhsm "$CONFIG_DIR/gsm.env"
     chmod 640 "$CONFIG_DIR/gsm.env"
     echo "    wrote $CONFIG_DIR/gsm.env"
@@ -297,7 +322,12 @@ systemctl enable softhsm2-gsm.service
 systemctl restart softhsm2-gsm.service
 
 sleep 1
-systemctl --no-pager status softhsm2-gsm.service || true
+if ! systemctl is-active --quiet softhsm2-gsm.service; then
+    systemctl --no-pager --full status softhsm2-gsm.service || true
+    echo "error: softhsm2-gsm.service did not stay active after installation" >&2
+    exit 1
+fi
+systemctl --no-pager status softhsm2-gsm.service
 
 cat <<EOF
 
