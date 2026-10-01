@@ -130,6 +130,13 @@ printf '%s\n' "$REPO_ROOT" > "$SBIN_DIR/hsm-source-dir"
 chown root:softhsm "$SBIN_DIR/hsm-source-dir"
 chmod 640 "$SBIN_DIR/hsm-source-dir"
 
+# Keep reference templates beside the active configuration. Reinstalling
+# refreshes the examples without overwriting host-specific active settings.
+install -o root -g softhsm -m 640 \
+    "$SCRIPT_DIR/softhsm2.conf.example" "$CONFIG_DIR/softhsm2.conf.example"
+install -o root -g softhsm -m 640 \
+    "$SCRIPT_DIR/gsm.env.example" "$CONFIG_DIR/gsm.env.example"
+
 if [ ! -f "$CONFIG_DIR/softhsm2.conf" ]; then
     install -o root -g softhsm -m 640 \
         "$SCRIPT_DIR/softhsm2.conf.example" "$CONFIG_DIR/softhsm2.conf"

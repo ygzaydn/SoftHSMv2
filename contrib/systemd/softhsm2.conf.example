@@ -1,5 +1,8 @@
 # Copied to /opt/softhsm2/etc/softhsm2.conf (root:softhsm, mode 640).
 directories.tokendir = /opt/softhsm2/tokens
 objectstore.backend = file
+objectstore.umask = 0077
 log.level = INFO
 slots.removable = false
+slots.mechanisms = ALL
+# log.file is intentionally omitted: SoftHSM uses syslog by default.

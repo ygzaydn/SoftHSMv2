@@ -18,6 +18,7 @@ What this package sets up:
 
 - runs as a dedicated `softhsm` system user, not root or your login user
 - config under `/opt/softhsm2/etc/` (`softhsm2.conf`, `gsm.env`, `gsm-pin`)
+- reference templates under `/opt/softhsm2/etc/` (`softhsm2.conf.example`, `gsm.env.example`)
 - token store under `/opt/softhsm2/tokens/`
 - logs under `/opt/softhsm2/logs/softhsm-gsm.log`
 - HSM management script under `/opt/softhsm2/sbin/hsm.sh` (with its helper in `sbin/lib/`)
@@ -73,6 +74,13 @@ the token and creates the Master Storage Key itself — the service comes
 up ready to onboard subscribers rather than needing manual setup
 afterwards. It installs the `softhsm2` wrapper command and installs,
 enables, and starts the systemd unit.
+
+The installer also refreshes `softhsm2.conf.example` and `gsm.env.example`
+in `/opt/softhsm2/etc/`. It never changes an existing active config.
+If an older install logs `Missing objectstore.umask` or
+`Missing slots.mechanisms`, add the values shown in the example to its
+active `softhsm2.conf`. `Missing log.file` is harmless: SoftHSM uses
+syslog when that optional setting is absent.
 
 Moving an existing token from another install of this same daemon (a
 different host, or a prior standalone setup)? Pass
