@@ -46,6 +46,15 @@ systemctl status softhsm2-gsm.service
 If the repositories are not siblings, pass the SoftHSM source path:
 `sudo env HSM_REPO=/path/to/SoftHSMv2 ./install.sh`.
 
+The installer records the checkout path for `/opt/softhsm2/sbin/hsm.sh`.
+To rebuild later, run `sudo /opt/softhsm2/sbin/hsm.sh build`. If you move
+the checkout, pass its new location with
+`sudo env HSM_REPO=/new/path/SoftHSMv2 /opt/softhsm2/sbin/hsm.sh build`.
+The `build/` directory contains generated files and may be deleted before
+rebuilding. When copying the checkout to another host or path, leave
+`build/` behind or delete it there first; CMake caches absolute paths.
+Token data and configuration live under `/opt/softhsm2/`.
+
 The fresh install creates a new token and Master Storage Key. Subscriber
 credentials wrapped for a different token must be provisioned again.
 To move an existing deployment instead, stop its daemon and transfer the

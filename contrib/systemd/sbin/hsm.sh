@@ -1,11 +1,19 @@
 #!/bin/bash
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The installer records the checkout it built from. When run directly from
+# this repository, derive that path from the script's own location.
+HSM_REPO_DEFAULT=""
+if [ -r "$SCRIPT_DIR/hsm-source-dir" ]; then
+    IFS= read -r HSM_REPO_DEFAULT < "$SCRIPT_DIR/hsm-source-dir"
+elif [ -f "$SCRIPT_DIR/../../../CMakeLists.txt" ]; then
+    HSM_REPO_DEFAULT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
 # Shared environment for all hsm-scripts scripts.
 set -a
 MONGO_URI="mongodb://localhost/open5gs"
-REPO=/home/aselsan/open5gs
-HSM_REPO=${HSM_REPO:-/home/aselsan/SoftHSMv2}
+HSM_REPO=${HSM_REPO:-$HSM_REPO_DEFAULT}
+REPO=${OPEN5GS_REPO:-$(dirname "$HSM_REPO")/open5gs}
 HSM_BUILD=$HSM_REPO/build
 SCRIPTS_DIR=$SCRIPT_DIR
 BASE_DIR=/opt/softhsm2
@@ -74,6 +82,11 @@ require_token() {
 
 # build: consolidated from hsm.sh build
 cmd_build() {
+
+if [ -z "$HSM_REPO" ] || [ ! -f "$HSM_REPO/CMakeLists.txt" ]; then
+	echo "error: SoftHSM source not found at '$HSM_REPO'; set HSM_REPO to the checkout path" >&2
+	return 1
+fi
 
 mkdir -p "$HSM_BUILD"
 cd "$HSM_BUILD"

@@ -126,6 +126,9 @@ chown root:softhsm "$SBIN_DIR" "$SBIN_DIR/lib"
 chmod 750 "$SBIN_DIR" "$SBIN_DIR/lib"
 install -o root -g softhsm -m 750 "$SCRIPT_DIR/sbin/hsm.sh" "$SBIN_DIR/hsm.sh"
 install -o root -g softhsm -m 640 "$SCRIPT_DIR/sbin/lib/daemon_client.py" "$SBIN_DIR/lib/daemon_client.py"
+printf '%s\n' "$REPO_ROOT" > "$SBIN_DIR/hsm-source-dir"
+chown root:softhsm "$SBIN_DIR/hsm-source-dir"
+chmod 640 "$SBIN_DIR/hsm-source-dir"
 
 if [ ! -f "$CONFIG_DIR/softhsm2.conf" ]; then
     install -o root -g softhsm -m 640 \
