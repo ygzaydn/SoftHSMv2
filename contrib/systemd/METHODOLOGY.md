@@ -28,7 +28,7 @@ only the outputs a 3GPP 5G-AKA exchange needs — never the key itself.
 
 ```
  ┌─────────────────────────┐        plain TCP        ┌──────────────────────────┐
- │   Open5GS UDM (+ UDR)    │  ─────────────────────▶ │   softhsm2-milenaged     │
+ │   Open5GS UDM (+ UDR)    │  ─────────────────────▶ │   softhsm-gsm           │
  │   lib/hsm (S5GM client)  │  ◀───────────────────── │   (this host)            │
  └─────────────────────────┘      S5GM protocol       └──────────────┬───────────┘
                                                                        │ PKCS#11
@@ -47,12 +47,12 @@ only the outputs a 3GPP 5G-AKA exchange needs — never the key itself.
   decides whether a subscriber is HSM-backed (`security.hsm: true` in
   MongoDB), and if so, calls out to the HSM instead of computing
   Milenage locally.
-- **`softhsm2-milenaged`** (this repository, `src/bin/milenage/`): a
+- **`softhsm-gsm`** (this repository, `src/bin/milenage/`): a
   small TCP daemon that translates network requests into PKCS#11 calls
   against the SoftHSM library it's linked against. It holds one open
   PKCS#11 session and the Master Storage Key handle for its whole
   lifetime.
-- **SoftHSM token storage** (`/opt/softhsm2-milenaged/tokens`): where
+- **SoftHSM token storage** (`/opt/softhsm2/tokens`): where
   the Master Storage Key physically lives, protected by the token's PIN.
   Only the daemon process (running as the `softhsm` user) has any
   access to it.
@@ -167,10 +167,10 @@ magic(4)="S5GM" | version(1) | operation(1) | reserved(2) | total_length(4, big-
 Operations: `PROVISION` (0x01), `5G_HE_AV` (0x02), `RESYNC` (0x03),
 `IMPORT_TRANSPORT` (0x04).
 
-`PROVISION` is unconditionally refused by `softhsm2-milenaged` over the
+`PROVISION` is unconditionally refused by `softhsm-gsm` over the
 network, regardless of build flags — it would mean sending plaintext
 `K`/`OPc` over the wire, which this daemon never allows; see the file
-header comment in `src/bin/milenage/softhsm2-milenaged.cpp`. It is only
+header comment in `src/bin/milenage/softhsm-gsm.cpp`. It is only
 ever available locally, via `softhsm2 provision` on the HSM host itself.
 
 `IMPORT_TRANSPORT` is different: it never carries plaintext `K`/`OPc`
@@ -274,7 +274,7 @@ writing the result into MongoDB and testing registration.
 | No, never | UDM, UDR, MongoDB, network between UDM and HSM, and (in production mode) this HSM host itself |
 | Briefly, at provisioning time only (PoC mode only) | whoever runs `softhsm2 provision` on the HSM host |
 | Briefly, at provisioning time only (production mode) | whatever external system runs `wrap-transport-package.py` — never this HSM host |
-| Yes, always, but never exposes it | the Master Storage Key inside the SoftHSM token, and the Milenage computation running inside `softhsm2-milenaged`'s process for the duration of a single request |
+| Yes, always, but never exposes it | the Master Storage Key inside the SoftHSM token, and the Milenage computation running inside `softhsm-gsm`'s process for the duration of a single request |
 
 If this HSM host is compromised, the Master Storage Key and the
 in-flight computation are exposed — this system does not defend

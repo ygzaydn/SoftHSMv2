@@ -1,6 +1,6 @@
-# softhsm2-milenaged: installation, subscriber onboarding, and daily operation
+# softhsm-gsm: installation, subscriber onboarding, and daily operation
 
-This document covers the full lifecycle of running `softhsm2-milenaged` as
+This document covers the full lifecycle of running `softhsm-gsm` as
 a systemd service: installing it, initializing the token, generating the
 Master Storage Key, onboarding (provisioning) subscribers, running the
 daemon, and day-to-day operational commands. Every command below is
@@ -9,7 +9,8 @@ self-contained and uses only what this package installs.
 ## 0) Build and install
 
 ```bash
-cd contrib/systemd
+# From the parent directory containing both repositories:
+cd open5gs-scripts/hsm-scripts
 sudo ./install.sh
 ```
 
@@ -19,7 +20,7 @@ build first. On first run (no `build/` yet) it configures with:
 | Flag | Purpose |
 | --- | --- |
 | `WITH_CRYPTO_BACKEND=openssl` | crypto backend for AES-KWP/CMAC used by Milenage wrapping. |
-| `WITH_MILENAGE=ON` | required — builds the Milenage/5G-AKA vendor mechanisms, the `softhsm2-milenage` CLI, and `softhsm2-milenaged`. |
+| `WITH_MILENAGE=ON` | required — builds the Milenage/5G-AKA vendor mechanisms, the `softhsm2-milenage` CLI, and `softhsm-gsm`. |
 | `WITH_MILENAGE_PLAINTEXT_PROVISIONING=ON` | **on by default** — enables the `provision` command (step 4 below), which stays available even after you're using the production Transport KEK flow (step 5). See "Locking this down" at the end of step 4 to turn it off once you no longer need it. |
 | `WITH_MILENAGE_TRANSPORT_IMPORT=ON` | required for the Transport KEK / `import-transport-wrapped` flow (step 5). |
 
@@ -32,7 +33,7 @@ the SoftHSMv2 test suite.
 
 It then installs:
 
-- the daemon (`softhsm2-milenaged`) and PKCS#11 module (`libsofthsm2.so`)
+- the daemon (`softhsm-gsm`) and PKCS#11 module (`libsofthsm2.so`)
   under `/usr/local`
 - a `softhsm2` command on your `PATH` (`/usr/local/bin/softhsm2`) — a
   thin wrapper around the underlying `softhsm2-milenage` binary that
@@ -40,9 +41,9 @@ It then installs:
   you don't have to pass `--module`/`--token-label`/`--pin-file` on
   every call
 - a dedicated `softhsm` system user/group
-- `/opt/softhsm2-milenaged/config/{softhsm2.conf,milenaged.env,milenaged-pin}` (written
+- `/opt/softhsm2/etc/{softhsm2.conf,gsm.env,gsm-pin}` (written
   only if they don't already exist)
-- the `softhsm2-milenaged.service` systemd unit, installed, enabled, and
+- the `softhsm2-gsm.service` systemd unit, installed, enabled, and
   started
 
 If this is a fresh token store (no `--migrate-from-token-dir`, nothing
@@ -58,7 +59,7 @@ and then runs the token initialization and Master Storage Key creation
 itself, so the service comes up ready to onboard subscribers rather
 than sitting in a restart loop waiting for you to do it by hand. Both
 values are printed once at the end — the User PIN is also saved to
-`/opt/softhsm2-milenaged/config/milenaged-pin` (the daemon and the
+`/opt/softhsm2/etc/gsm-pin` (the daemon and the
 `softhsm2` wrapper read it from there afterwards); the SO-PIN is **not**
 saved anywhere, write it down if you want it for future re-initialization.
 
@@ -106,11 +107,11 @@ sudo softhsm2 inspect
 This prints the Master Storage Key's non-secret metadata (label, id,
 extractability). If it instead reports nothing is present, something
 went wrong during install — check
-`journalctl -u softhsm2-milenaged` and the log file (step 7), then you
+`journalctl -u softhsm-gsm` and the log file (step 7), then you
 can run the same two steps by hand:
 
 ```bash
-PIN=$(sudo cat /opt/softhsm2-milenaged/config/milenaged-pin)
+PIN=$(sudo cat /opt/softhsm2/etc/gsm-pin)
 SO_PIN=$(openssl rand -hex 8)   # only needed if you must re-initialize; see step 11
 
 sudo -u softhsm softhsm2-util --module /usr/local/lib/softhsm/libsofthsm2.so \
@@ -121,7 +122,7 @@ sudo softhsm2 create-master-key
 ```
 
 The token label above (`open5gs-milenage` by default) must match
-`TOKEN_LABEL` in `/opt/softhsm2-milenaged/config/milenaged.env`.
+`TOKEN_LABEL` in `/opt/softhsm2/etc/gsm.env`.
 
 One AES-256 Master Storage Key per token; running `create-master-key`
 twice on the same token fails. Every subscriber's wrapped K/OPc is
@@ -160,8 +161,14 @@ echo -n "${K_HEX}${OPC_HEX}" | xxd -r -p \
 
 Take the resulting `wrapped_k`/`wrapped_opc` values and store them on the
 subscriber's record wherever your subscriber database lives (e.g. as
-`security.hsm = true`, `security.wrapped_k`, `security.wrapped_opc`). This
-package does not manage the subscriber database itself.
+`security.hsm = true`, `security.wrapped_k`, `security.wrapped_opc`) —
+**and set `security.k`/`security.opc` to `null` in the same update** if
+the record already has plaintext values in those fields (e.g. from
+creating it with `open5gs-dbctl add`). Otherwise the real K/OPc stays
+sitting in the database at rest even though nothing ever reads it for
+an HSM subscriber — see the worked example in step 5 for a
+`db.subscribers.updateOne()` that does both at once. This package does
+not manage the subscriber database itself.
 
 For production onboarding, use the transport-wrapped import flow (step
 5 below) instead — it never exposes K/OPc in plaintext to any process
@@ -178,7 +185,7 @@ it as long as the build supports it:
 cd build
 cmake -DWITH_MILENAGE_PLAINTEXT_PROVISIONING=OFF .
 cd ..
-sudo ./contrib/systemd/install.sh
+sudo env HSM_REPO="$PWD" ../open5gs-scripts/hsm-scripts/install.sh
 ```
 
 After this, `softhsm2 provision` fails immediately with "this build
@@ -203,16 +210,16 @@ receives K/OPc already wrapped under it.
 
 ```bash
 sudo ./external-scripts/generate-transport-kek.sh
-# writes /opt/softhsm2-milenaged/config/transport-kek (32 raw bytes, mode 600)
+# writes /opt/softhsm2/etc/transport-kek (32 raw bytes, mode 600)
 
 sudo softhsm2 import-transport-kek --input-fd 0 \
-    < /opt/softhsm2-milenaged/config/transport-kek
+    < /opt/softhsm2/etc/transport-kek
 ```
 
 After this, the KEK is `CKA_EXTRACTABLE=FALSE` inside the token — the
 HSM can use it to unwrap incoming packages, but can never be asked to
 hand its value back out. The copy on disk at
-`/opt/softhsm2-milenaged/config/transport-kek` is what any external
+`/opt/softhsm2/etc/transport-kek` is what any external
 wrapping tool (including `wrap-transport-package.py`) needs — treat it
 with the same care as the token PIN.
 
@@ -224,7 +231,7 @@ pip install cryptography   # once, wherever you run this
 
 python3 external-scripts/wrap-transport-package.py \
     --supi imsi-999700000012345 \
-    --kek-file /opt/softhsm2-milenaged/config/transport-kek \
+    --kek-file /opt/softhsm2/etc/transport-kek \
     --k-hex 465B5CE8B199B49FAA5F0A2EE238A6BC \
     --opc-hex E8ED289DEBA952E4283B54E88E6183CA
 ```
@@ -257,7 +264,7 @@ per subscriber — skip if already done):
 ```bash
 sudo ./external-scripts/generate-transport-kek.sh
 sudo softhsm2 import-transport-kek --input-fd 0 \
-    < /opt/softhsm2-milenaged/config/transport-kek
+    < /opt/softhsm2/etc/transport-kek
 ```
 
 **2. Wrap the subscriber's K/OPc under the Transport KEK** (on the
@@ -267,7 +274,7 @@ test, on the HSM host itself):
 ```bash
 python3 ./external-scripts/wrap-transport-package.py \
     --supi imsi-999700000012345 \
-    --kek-file /opt/softhsm2-milenaged/config/transport-kek \
+    --kek-file /opt/softhsm2/etc/transport-kek \
     --k-hex 465B5CE8B199B49FAA5F0A2EE238A6BC \
     --opc-hex E8ED289DEBA952E4283B54E88E6183CA
 ```
@@ -288,10 +295,12 @@ This prints `{"hsm": true, "wrapped_k": "...", "wrapped_opc": "...", ...}`.
 
 **4. Write the subscriber into Open5GS's database.** Create the base
 subscriber record however you normally would (e.g. Open5GS's own
-`misc/db/open5gs-dbctl add <imsi> <dummy-k> <dummy-opc>`, or the WebUI —
-the K/OPc given here are placeholders that get overwritten in the next
-step and are never used, since `security.hsm: true` makes the UDM/UDR
-ignore them), then set the HSM fields:
+`misc/db/open5gs-dbctl add <imsi> <dummy-k> <dummy-opc>`, or the WebUI).
+**Use an obviously-fake K/OPc for this step, never the subscriber's real
+one** — `open5gs-dbctl add` writes them straight into `security.k`/
+`security.opc` as plaintext, and the next command below only adds the
+HSM fields on top, it does not remove them. Then set the HSM fields
+**and null out the plaintext ones in the same update**:
 
 ```javascript
 // mongosh
@@ -300,7 +309,9 @@ db.subscribers.updateOne(
   { $set: {
       "security.hsm": true,
       "security.wrapped_k": "<wrapped_k from step 3>",
-      "security.wrapped_opc": "<wrapped_opc from step 3>"
+      "security.wrapped_opc": "<wrapped_opc from step 3>",
+      "security.k": null,
+      "security.opc": null
   }}
 );
 ```
@@ -350,27 +361,27 @@ token or reset window) accordingly.
 ## 6) Start / stop / restart the service
 
 ```bash
-sudo systemctl start softhsm2-milenaged
-sudo systemctl stop softhsm2-milenaged
-sudo systemctl restart softhsm2-milenaged     # required after any config change
-sudo systemctl status softhsm2-milenaged
-sudo systemctl enable softhsm2-milenaged      # start automatically on boot
-sudo systemctl disable softhsm2-milenaged
+sudo systemctl start softhsm-gsm
+sudo systemctl stop softhsm-gsm
+sudo systemctl restart softhsm-gsm     # required after any config change
+sudo systemctl status softhsm-gsm
+sudo systemctl enable softhsm-gsm      # start automatically on boot
+sudo systemctl disable softhsm-gsm
 ```
 
 Configuration files:
 
 ```bash
-sudo nano /opt/softhsm2-milenaged/config/milenaged.env     # TOKEN_LABEL, LISTEN_ADDR, LISTEN_PORT
-sudo nano /opt/softhsm2-milenaged/config/softhsm2.conf     # token directory, log level, etc.
-sudo systemctl restart softhsm2-milenaged  # apply changes
+sudo nano /opt/softhsm2/etc/gsm.env     # TOKEN_LABEL, LISTEN_ADDR, LISTEN_PORT
+sudo nano /opt/softhsm2/etc/softhsm2.conf     # token directory, log level, etc.
+sudo systemctl restart softhsm-gsm  # apply changes
 ```
 
 ## 7) Logs
 
 ```bash
-sudo tail -f /opt/softhsm2-milenaged/logs/softhsm2-milenaged.log
-journalctl -u softhsm2-milenaged -f
+sudo tail -f /opt/softhsm2/logs/softhsm-gsm.log
+journalctl -u softhsm-gsm -f
 ```
 
 Logs include AV/resync request and response events (SUPI, operation
@@ -386,10 +397,10 @@ codes.
 The log file is archived, not truncated, on every stop: when the
 service stops (manually, on restart, or after a crash-restart), the
 current log is renamed to
-`softhsm2-milenaged-<UTC-ish local timestamp, YYYYMMDDTHHMMSS>.log` in
-the same directory, and a fresh `softhsm2-milenaged.log` is created the
+`softhsm-gsm-<UTC-ish local timestamp, YYYYMMDDTHHMMSS>.log` in
+the same directory, and a fresh `softhsm-gsm.log` is created the
 next time it starts. Nothing is deleted automatically — old archives
-accumulate under `/opt/softhsm2-milenaged/logs/` until you clean them
+accumulate under `/opt/softhsm2/logs/` until you clean them
 up yourself.
 
 ## 8) Generate a 5G HE AV (smoke test)
@@ -407,8 +418,8 @@ sudo softhsm2 generate-5g-av \
 ```
 
 This exercises the token directly through the CLI (not the network
-daemon). To confirm `softhsm2-milenaged` itself is reachable over TCP,
-connect to `LISTEN_ADDR:LISTEN_PORT` (from `/opt/softhsm2-milenaged/config/milenaged.env`)
+daemon). To confirm `softhsm-gsm` itself is reachable over TCP,
+connect to `LISTEN_ADDR:LISTEN_PORT` (from `/opt/softhsm2/etc/gsm.env`)
 and send an S5GM `GENERATE_5G_HE_AV` request with the same wrapped
 credentials and parameters; a healthy daemon returns a successful S5GM
 response containing RAND/AUTN/XRES*/KAUSF.
@@ -428,7 +439,7 @@ sudo softhsm2 resync \
 ## 10) Preventing token conflicts
 
 Only one process may hold the token's PIN session at a time. If you
-previously ran `softhsm2-milenaged` manually (outside systemd) against
+previously ran `softhsm-gsm` manually (outside systemd) against
 the same token directory, stop that process before starting the service,
 and don't run both simultaneously.
 
@@ -439,9 +450,9 @@ There is no undo — subscribers provisioned under it must be re-onboarded
 from step 4 onward, against a fresh Master Storage Key created during step 3.
 
 ```bash
-sudo systemctl stop softhsm2-milenaged
-sudo rm -rf /opt/softhsm2-milenaged/tokens/*
-sudo rm -f /opt/softhsm2-milenaged/config/milenaged-pin
+sudo systemctl stop softhsm-gsm
+sudo rm -rf /opt/softhsm2/tokens/*
+sudo rm -f /opt/softhsm2/etc/gsm-pin
 # then repeat step 3 (init token and create master key)
 ```
 
@@ -457,14 +468,14 @@ This stops and removes the systemd unit, the `softhsm2` wrapper, the
 binaries and PKCS#11 module (using `build/install_manifest.txt` if it
 exists, so only files this build actually installed are removed), and
 the `softhsm` system user and group. It always removes
-`/opt/softhsm2-milenaged/config` and `/opt/softhsm2-milenaged/logs`
+`/opt/softhsm2/etc` and `/opt/softhsm2/logs`
 without prompting (config is regenerated on reinstall; logs aren't
 meant to outlive the service). It prompts before deleting
-`/opt/softhsm2-milenaged/tokens`, since that permanently destroys the
+`/opt/softhsm2/tokens`, since that permanently destroys the
 Master Storage Key and every subscriber's wrapped credentials:
 
 ```bash
-sudo ./uninstall.sh --keep-tokens   # preserve /opt/softhsm2-milenaged/tokens
+sudo ./uninstall.sh --keep-tokens   # preserve /opt/softhsm2/tokens
 sudo ./uninstall.sh --yes           # don't prompt before deleting it
 ```
 
@@ -480,20 +491,20 @@ else needs to be tracked or backed up separately.
 | Path | Contents | Who reads it |
 | --- | --- | --- |
 | `/usr/local/bin/softhsm2-milenage` | CLI binary. | invoked by the `softhsm2` wrapper. |
-| `/usr/local/bin/softhsm2-milenaged` | daemon binary. | invoked by the systemd unit. |
+| `/usr/local/bin/softhsm-gsm` | daemon binary. | invoked by the systemd unit. |
 | `/usr/local/bin/softhsm2` | the wrapper described in step 0 — the only command you're expected to type by hand. | you. |
-| `/usr/local/bin/softhsm2-milenaged-rotate-log` | archives the log file on every service stop (see step 7). Not meant to be run by hand. | the systemd unit (`ExecStopPost=`). |
+| `/usr/local/bin/softhsm-gsm-rotate-log` | archives the log file on every service stop (see step 7). Not meant to be run by hand. | the systemd unit (`ExecStopPost=`). |
 | `/usr/local/lib/softhsm/libsofthsm2.so` | PKCS#11 module. | both binaries above, path is baked into the `softhsm2` wrapper and the systemd unit. |
-| `/opt/softhsm2-milenaged/config/softhsm2.conf` | `directories.tokendir`, `objectstore.backend`, `log.level`, `slots.removable`. | every PKCS#11 client (`softhsm2-util`, `softhsm2-milenage`, `softhsm2-milenaged`) via `SOFTHSM2_CONF`. |
-| `/opt/softhsm2-milenaged/config/milenaged.env` | `TOKEN_LABEL`, `LISTEN_ADDR`, `LISTEN_PORT`. | the systemd unit (`EnvironmentFile=`) and the `softhsm2` wrapper (sourced directly, so both always agree on the token label). |
-| `/opt/softhsm2-milenaged/config/milenaged-pin` | the token's user PIN, plaintext, mode `640`, owner `root:softhsm`. | the systemd unit and the `softhsm2` wrapper. Never printed, logged, or accepted as a command-line argument. |
-| `/opt/softhsm2-milenaged/tokens/` | the actual token: Master Storage Key, Transport KEK (if imported), and every subscriber's wrapped K/OPc. | `softhsm2-milenaged`, `softhsm2` wrapper commands — this directory is the one thing worth backing up. |
-| `/opt/softhsm2-milenaged/config/transport-kek` | the raw 32-byte Transport KEK (see step 5) — NOT created by `install.sh`, only by `external-scripts/generate-transport-kek.sh`. Mode 600, owner `root:root` (not `softhsm`) — the daemon has no need for it. | `external-scripts/wrap-transport-package.py`, and whatever imported it into the token once via `softhsm2 import-transport-kek`. |
-| `/opt/softhsm2-milenaged/logs/softhsm2-milenaged.log` | daemon operational log (see step 7). | you, via `tail`/`journalctl`. |
+| `/opt/softhsm2/etc/softhsm2.conf` | `directories.tokendir`, `objectstore.backend`, `log.level`, `slots.removable`. | every PKCS#11 client (`softhsm2-util`, `softhsm2-milenage`, `softhsm-gsm`) via `SOFTHSM2_CONF`. |
+| `/opt/softhsm2/etc/gsm.env` | `TOKEN_LABEL`, `LISTEN_ADDR`, `LISTEN_PORT`. | the systemd unit (`EnvironmentFile=`) and the `softhsm2` wrapper (sourced directly, so both always agree on the token label). |
+| `/opt/softhsm2/etc/gsm-pin` | the token's user PIN, plaintext, mode `640`, owner `root:softhsm`. | the systemd unit and the `softhsm2` wrapper. Never printed, logged, or accepted as a command-line argument. |
+| `/opt/softhsm2/tokens/` | the actual token: Master Storage Key, Transport KEK (if imported), and every subscriber's wrapped K/OPc. | `softhsm-gsm`, `softhsm2` wrapper commands — this directory is the one thing worth backing up. |
+| `/opt/softhsm2/etc/transport-kek` | the raw 32-byte Transport KEK (see step 5) — NOT created by `install.sh`, only by `external-scripts/generate-transport-kek.sh`. Mode 600, owner `root:root` (not `softhsm`) — the daemon has no need for it. | `external-scripts/wrap-transport-package.py`, and whatever imported it into the token once via `softhsm2 import-transport-kek`. |
+| `/opt/softhsm2/logs/softhsm-gsm.log` | daemon operational log (see step 7). | you, via `tail`/`journalctl`. |
 
 ### Why `--module` isn't something you set
 
-`softhsm2-milenage` and `softhsm2-milenaged` both take `--module` as a
+`softhsm2-milenage` and `softhsm-gsm` both take `--module` as a
 raw CLI flag, because the underlying binaries are generic PKCS#11
 tools that don't assume any particular install layout. On a host
 installed by `install.sh`, though, there's exactly one module
@@ -502,18 +513,18 @@ using it — there's nothing for a second value to mean. The `softhsm2`
 wrapper (step 0) and the systemd unit hard-code that path so you never
 type it. The only two values that legitimately vary per-deployment are
 the token label and the listen address/port, and both of those already
-live in `/opt/softhsm2-milenaged/config/milenaged.env` rather than being passed by hand
+live in `/opt/softhsm2/etc/gsm.env` rather than being passed by hand
 each time. If you ever run more than one token on the same host (e.g.
 to separate environments), that's the point where `--module` stops
 being fixed — see "Running more than one token" below.
 
 ### Running more than one token on the same host
 
-This package assumes one token, one `softhsm2-milenaged` instance, one
+This package assumes one token, one `softhsm-gsm` instance, one
 `softhsm2` wrapper. To run a second, independent token (a different
 `TOKEN_LABEL`, its own Master Storage Key, its own listen port), you'd
-need a second `/opt/softhsm2-milenaged/config/milenaged.env`, a second systemd unit
-(copy `softhsm2-milenaged.service` under a new name and point its
+need a second `/opt/softhsm2/etc/gsm.env`, a second systemd unit
+(copy `softhsm2-gsm.service` under a new name and point its
 `EnvironmentFile=` at the new env file), and a second wrapper script (a
 copy of `softhsm2-wrapper.sh` under a different name, pointed at that
 env file). This isn't automated by `install.sh` — it only sets up the

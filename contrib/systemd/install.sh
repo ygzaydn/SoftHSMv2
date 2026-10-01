@@ -1,16 +1,16 @@
 #!/bin/bash
-# Builds and installs softhsm2-milenaged as a systemd service, and (on a
+# Builds and installs softhsm-gsm as a systemd service, and (on a
 # fresh token store) walks you through initializing the token and
 # creating the Master Storage Key so the service comes up ready to use:
 #   build    -> ../../build (configured + rebuilt so you always install
 #                the current source tree, not a stale binary)
-#   binary   -> /usr/local/bin/softhsm2-milenaged (+ softhsm2-milenage CLI)
+#   binary   -> /usr/local/bin/softhsm-gsm (+ softhsm2-milenage CLI)
 #   wrapper  -> /usr/local/bin/softhsm2
 #   module   -> /usr/local/lib/softhsm/libsofthsm2.so
-#   config   -> /opt/softhsm2-milenaged/config/{softhsm2.conf,milenaged.env,milenaged-pin}
-#   tokens   -> /opt/softhsm2-milenaged/tokens
-#   logs     -> /opt/softhsm2-milenaged/logs/softhsm2-milenaged.log
-#   service  -> softhsm system user, softhsm2-milenaged.service
+#   config   -> /opt/softhsm2/etc/{softhsm2.conf,gsm.env,gsm-pin}
+#   tokens   -> /opt/softhsm2/tokens
+#   logs     -> /opt/softhsm2/logs/softhsm-gsm.log
+#   service  -> softhsm system user, softhsm2-gsm.service
 #
 # Must be run as root (sudo). Safe to re-run (idempotent where possible;
 # an already-initialized token or existing config is never overwritten
@@ -31,9 +31,19 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# A separately managed local deployment must not be replaced by this
+# installer, which creates a dedicated softhsm service account.
+if [ -f /etc/systemd/system/softhsm2-gsm.service ]; then
+    existing_user="$(systemctl show softhsm2-gsm.service -p User --value 2>/dev/null || true)"
+    if [ -n "$existing_user" ] && [ "$existing_user" != softhsm ]; then
+        echo "error: softhsm2-gsm.service runs as $existing_user; this installer expects softhsm" >&2
+        echo "       use that deployment's management script instead of replacing its service" >&2
+        exit 1
+    fi
+fi
 BUILD_DIR="$REPO_ROOT/build"
-BASE_DIR=/opt/softhsm2-milenaged
-CONFIG_DIR="$BASE_DIR/config"
+BASE_DIR=/opt/softhsm2
+CONFIG_DIR="$BASE_DIR/etc"
 TOKEN_DIR="$BASE_DIR/tokens"
 LOG_DIR="$BASE_DIR/logs"
 REAL_CLI=/usr/local/bin/softhsm2-milenage
@@ -51,6 +61,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Never initialize a fresh token while an older deployment's Master
+# Storage Key is still present under the former service directory.
+if [ -d /opt/softhsm2-milenaged/tokens ] &&
+   [ -n "$(ls -A /opt/softhsm2-milenaged/tokens 2>/dev/null)" ] &&
+   [ -z "$MIGRATE_TOKEN_DIR" ] &&
+   [ ! -d "$TOKEN_DIR" ]; then
+    echo "error: existing token store found at /opt/softhsm2-milenaged/tokens" >&2
+    echo "       stop the previous service, then use --migrate-from-token-dir and --migrate-from-pin-file" >&2
+    exit 1
+fi
+
 echo "==> configuring and building SoftHSMv2 (latest source tree)"
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
@@ -62,16 +83,16 @@ if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
 fi
 (cd "$BUILD_DIR" && make -j"$(nproc)")
 
-if [ ! -x "$BUILD_DIR/src/bin/milenage/softhsm2-milenaged" ]; then
-    echo "error: build did not produce $BUILD_DIR/src/bin/milenage/softhsm2-milenaged" >&2
+if [ ! -x "$BUILD_DIR/src/bin/milenage/softhsm-gsm" ]; then
+    echo "error: build did not produce $BUILD_DIR/src/bin/milenage/softhsm-gsm" >&2
     exit 1
 fi
 
 echo "==> installing binaries and PKCS#11 module to /usr/local (cmake install)"
 cmake --install "$BUILD_DIR"
 
-if [ ! -x /usr/local/bin/softhsm2-milenaged ]; then
-    echo "error: cmake --install did not produce /usr/local/bin/softhsm2-milenaged" >&2
+if [ ! -x /usr/local/bin/softhsm-gsm ]; then
+    echo "error: cmake --install did not produce /usr/local/bin/softhsm-gsm" >&2
     exit 1
 fi
 
@@ -109,7 +130,7 @@ fi
 TOKEN_LABEL="open5gs-milenage"
 LISTEN_ADDR="127.0.0.1"
 LISTEN_PORT="9999"
-if [ ! -f "$CONFIG_DIR/milenaged.env" ]; then
+if [ ! -f "$CONFIG_DIR/gsm.env" ]; then
     echo ""
     echo "==> daemon network/token settings"
     if [ -t 0 ]; then
@@ -120,19 +141,20 @@ if [ ! -f "$CONFIG_DIR/milenaged.env" ]; then
         echo "    no TTY attached -- using defaults (label=$TOKEN_LABEL, $LISTEN_ADDR:$LISTEN_PORT)"
     fi
     {
-        echo "# Written by install.sh. See milenaged.env.example for a description"
+        echo "# Written by install.sh. See gsm.env.example for a description"
         echo "# of these settings."
         echo "TOKEN_LABEL=$TOKEN_LABEL"
         echo "LISTEN_ADDR=$LISTEN_ADDR"
         echo "LISTEN_PORT=$LISTEN_PORT"
-    } > "$CONFIG_DIR/milenaged.env"
-    chown root:softhsm "$CONFIG_DIR/milenaged.env"
-    chmod 640 "$CONFIG_DIR/milenaged.env"
-    echo "    wrote $CONFIG_DIR/milenaged.env"
+        echo "LISTEN_UNIX=/run/softhsm-gsm/gsm.sock"
+    } > "$CONFIG_DIR/gsm.env"
+    chown root:softhsm "$CONFIG_DIR/gsm.env"
+    chmod 640 "$CONFIG_DIR/gsm.env"
+    echo "    wrote $CONFIG_DIR/gsm.env"
 else
     # shellcheck source=/dev/null
-    . "$CONFIG_DIR/milenaged.env"
-    echo "    $CONFIG_DIR/milenaged.env already exists, not overwriting (label=$TOKEN_LABEL, $LISTEN_ADDR:$LISTEN_PORT)"
+    . "$CONFIG_DIR/gsm.env"
+    echo "    $CONFIG_DIR/gsm.env already exists, not overwriting (label=$TOKEN_LABEL, $LISTEN_ADDR:$LISTEN_PORT)"
 fi
 
 NEED_TOKEN_INIT=0
@@ -149,13 +171,13 @@ if [ -n "$MIGRATE_TOKEN_DIR" ]; then
         chown -R softhsm:softhsm "$TOKEN_DIR"
         echo "    migrated (already-provisioned subscribers keep working)"
     fi
-    if [ -n "$MIGRATE_PIN_FILE" ] && [ ! -f "$CONFIG_DIR/milenaged-pin" ]; then
+    if [ -n "$MIGRATE_PIN_FILE" ] && [ ! -f "$CONFIG_DIR/gsm-pin" ]; then
         if [ ! -f "$MIGRATE_PIN_FILE" ]; then
             echo "error: --migrate-from-pin-file $MIGRATE_PIN_FILE does not exist" >&2
             exit 1
         fi
-        install -o root -g softhsm -m 640 "$MIGRATE_PIN_FILE" "$CONFIG_DIR/milenaged-pin"
-        echo "    copied PIN from $MIGRATE_PIN_FILE to $CONFIG_DIR/milenaged-pin"
+        install -o root -g softhsm -m 640 "$MIGRATE_PIN_FILE" "$CONFIG_DIR/gsm-pin"
+        echo "    copied PIN from $MIGRATE_PIN_FILE to $CONFIG_DIR/gsm-pin"
     fi
 elif [ -n "$(ls -A "$TOKEN_DIR" 2>/dev/null)" ]; then
     echo "==> $TOKEN_DIR already has data, not touching it"
@@ -175,7 +197,7 @@ if [ "$NEED_TOKEN_INIT" -eq 1 ]; then
             read -r -s -p "User PIN (leave blank to auto-generate): " PIN; echo
             if [ -z "$PIN" ]; then
                 PIN="$(openssl rand -hex 8)"
-                echo "    generated PIN: $PIN  (shown once -- also saved to $CONFIG_DIR/milenaged-pin)"
+                echo "    generated PIN: $PIN  (shown once -- also saved to $CONFIG_DIR/gsm-pin)"
             fi
         done
         while [ -z "$SO_PIN" ]; do
@@ -191,9 +213,9 @@ if [ "$NEED_TOKEN_INIT" -eq 1 ]; then
         echo "    no TTY attached -- auto-generated PIN and SO-PIN (printed at the end)"
     fi
 
-    printf '%s' "$PIN" > "$CONFIG_DIR/milenaged-pin"
-    chown root:softhsm "$CONFIG_DIR/milenaged-pin"
-    chmod 640 "$CONFIG_DIR/milenaged-pin"
+    printf '%s' "$PIN" > "$CONFIG_DIR/gsm-pin"
+    chown root:softhsm "$CONFIG_DIR/gsm-pin"
+    chmod 640 "$CONFIG_DIR/gsm-pin"
 
     # NOTE: `VAR=val sudo cmd` does NOT reliably pass VAR through --
     # sudo's default env_reset strips it before the target user's
@@ -208,7 +230,7 @@ if [ "$NEED_TOKEN_INIT" -eq 1 ]; then
     echo "==> creating the Master Storage Key"
     sudo -u softhsm env SOFTHSM2_CONF="$CONFIG_DIR/softhsm2.conf" \
         "$REAL_CLI" create-master-key \
-            --module "$MODULE" --token-label "$TOKEN_LABEL" --pin-file "$CONFIG_DIR/milenaged-pin"
+            --module "$MODULE" --token-label "$TOKEN_LABEL" --pin-file "$CONFIG_DIR/gsm-pin"
 
     if [ -z "$(ls -A "$TOKEN_DIR" 2>/dev/null)" ]; then
         echo "error: token initialization reported success, but $TOKEN_DIR is still empty." >&2
@@ -228,35 +250,47 @@ fi
 echo "==> installing softhsm2 wrapper command to /usr/local/bin/softhsm2"
 install -m 755 "$SCRIPT_DIR/softhsm2-wrapper.sh" /usr/local/bin/softhsm2
 
-echo "==> installing log-rotation helper to /usr/local/bin/softhsm2-milenaged-rotate-log"
-install -m 755 "$SCRIPT_DIR/rotate-log.sh" /usr/local/bin/softhsm2-milenaged-rotate-log
+echo "==> installing log-rotation helper to /usr/local/bin/softhsm-gsm-rotate-log"
+install -m 755 "$SCRIPT_DIR/rotate-log.sh" /usr/local/bin/softhsm-gsm-rotate-log
+
+if command -v logrotate >/dev/null 2>&1; then
+    echo "==> installing logrotate policy to /etc/logrotate.d/softhsm-gsm"
+    install -m 644 "$SCRIPT_DIR/softhsm-gsm.logrotate" \
+        /etc/logrotate.d/softhsm-gsm
+else
+    echo "==> logrotate not found on this host, skipping /etc/logrotate.d/softhsm-gsm"
+fi
+
+echo "==> installing failure-alert unit"
+install -m 644 "$SCRIPT_DIR/softhsm2-gsm-alert.service" \
+    /etc/systemd/system/softhsm2-gsm-alert.service
 
 echo "==> installing systemd unit"
-install -m 644 "$SCRIPT_DIR/softhsm2-milenaged.service" \
-    /etc/systemd/system/softhsm2-milenaged.service
+install -m 644 "$SCRIPT_DIR/softhsm2-gsm.service" \
+    /etc/systemd/system/softhsm2-gsm.service
 systemctl daemon-reload
 
-echo "==> enabling and (re)starting softhsm2-milenaged.service"
+echo "==> enabling and (re)starting softhsm2-gsm.service"
 # `enable --now` only starts the unit if it wasn't already running --
 # on a reinstall (new binary, changed config) that would silently leave
 # the OLD process running. `restart` starts it either way and always
 # picks up whatever was just installed.
-systemctl enable softhsm2-milenaged.service
-systemctl restart softhsm2-milenaged.service
+systemctl enable softhsm2-gsm.service
+systemctl restart softhsm2-gsm.service
 
 sleep 1
-systemctl --no-pager status softhsm2-milenaged.service || true
+systemctl --no-pager status softhsm2-gsm.service || true
 
 cat <<EOF
 
 Done. Everything for this service lives under $BASE_DIR:
 
-  config:  $CONFIG_DIR/softhsm2.conf, $CONFIG_DIR/milenaged.env
-  PIN:     $CONFIG_DIR/milenaged-pin  (root:softhsm, mode 640)
+  config:  $CONFIG_DIR/softhsm2.conf, $CONFIG_DIR/gsm.env
+  PIN:     $CONFIG_DIR/gsm-pin  (root:softhsm, mode 640)
   tokens:  $TOKEN_DIR     (softhsm:softhsm)
-  logs:    $LOG_DIR/softhsm2-milenaged.log
+  logs:    $LOG_DIR/softhsm-gsm.log
   wrapper: softhsm2 --help
-  service: systemctl {status,restart,stop} softhsm2-milenaged
+  service: systemctl {status,restart,stop} softhsm2-gsm
 
 See USAGE.md in this directory for onboarding subscribers.
 EOF
@@ -266,7 +300,7 @@ cat <<EOF
 
 IMPORTANT -- write these down now, they are only shown this once:
 
-  User PIN: $PIN_TO_PRINT   (also saved to $CONFIG_DIR/milenaged-pin -- the
+  User PIN: $PIN_TO_PRINT   (also saved to $CONFIG_DIR/gsm-pin -- the
                              daemon and the softhsm2 wrapper read it from
                              there, you will not need to type it again)
   SO-PIN:   $SO_PIN_TO_PRINT   (NOT saved anywhere -- needed only if you ever

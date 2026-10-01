@@ -1,12 +1,12 @@
 #!/bin/bash
 # Removes everything install.sh created: the systemd unit, the softhsm2
-# wrapper, the installed binaries/PKCS#11 module, /opt/softhsm2-milenaged
+# wrapper, the installed binaries/PKCS#11 module, /opt/softhsm2
 # (config, tokens, logs -- with confirmation for the tokens), and the
 # system user/group. Must be run as root.
 #
 # usage: uninstall.sh [--keep-tokens] [--yes]
 #
-# --keep-tokens   leave /opt/softhsm2-milenaged/tokens in place, e.g. if
+# --keep-tokens   leave /opt/softhsm2/tokens in place, e.g. if
 #                 you intend to reinstall or migrate it elsewhere with
 #                 `install.sh --migrate-from-token-dir`.
 # --yes           don't prompt for confirmation before deleting the
@@ -26,7 +26,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build"
-BASE_DIR=/opt/softhsm2-milenaged
+BASE_DIR=/opt/softhsm2
 TOKEN_DIR="$BASE_DIR/tokens"
 
 KEEP_TOKENS=0
@@ -39,17 +39,21 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-echo "==> stopping and disabling softhsm2-milenaged.service"
-systemctl stop softhsm2-milenaged.service 2>/dev/null || true
-systemctl disable softhsm2-milenaged.service 2>/dev/null || true
-rm -f /etc/systemd/system/softhsm2-milenaged.service
+echo "==> stopping and disabling softhsm2-gsm.service"
+systemctl stop softhsm2-gsm.service 2>/dev/null || true
+systemctl disable softhsm2-gsm.service 2>/dev/null || true
+rm -f /etc/systemd/system/softhsm2-gsm.service
+rm -f /etc/systemd/system/softhsm2-gsm-alert.service
 systemctl daemon-reload
 
 echo "==> removing /usr/local/bin/softhsm2 (wrapper)"
 rm -f /usr/local/bin/softhsm2
 
-echo "==> removing /usr/local/bin/softhsm2-milenaged-rotate-log"
-rm -f /usr/local/bin/softhsm2-milenaged-rotate-log
+echo "==> removing /usr/local/bin/softhsm-gsm-rotate-log"
+rm -f /usr/local/bin/softhsm-gsm-rotate-log
+
+echo "==> removing /etc/logrotate.d/softhsm-gsm"
+rm -f /etc/logrotate.d/softhsm-gsm
 
 echo "==> removing installed binaries and PKCS#11 module"
 if [ -f "$BUILD_DIR/install_manifest.txt" ]; then
@@ -61,7 +65,7 @@ else
     echo "    no install_manifest.txt found, removing known fixed paths"
     for f in \
         /usr/local/bin/softhsm2-milenage \
-        /usr/local/bin/softhsm2-milenaged \
+        /usr/local/bin/softhsm-gsm \
         /usr/local/bin/softhsm2-util \
         /usr/local/bin/softhsm2-keyconv \
         /usr/local/bin/softhsm2-dump-file \
@@ -75,7 +79,7 @@ fi
 
 if [ "$KEEP_TOKENS" -eq 1 ]; then
     echo "==> --keep-tokens given: removing config and logs, leaving $TOKEN_DIR in place"
-    rm -rf "$BASE_DIR/config" "$BASE_DIR/logs"
+    rm -rf "$BASE_DIR/etc" "$BASE_DIR/logs"
 else
     if [ -d "$TOKEN_DIR" ] && [ -n "$(ls -A "$TOKEN_DIR" 2>/dev/null)" ]; then
         if [ "$ASSUME_YES" -ne 1 ]; then
@@ -92,7 +96,7 @@ else
     fi
     if [ "$KEEP_TOKENS" -eq 1 ]; then
         echo "==> removing config and logs, leaving $TOKEN_DIR in place"
-        rm -rf "$BASE_DIR/config" "$BASE_DIR/logs"
+        rm -rf "$BASE_DIR/etc" "$BASE_DIR/logs"
     else
         echo "==> removing $BASE_DIR"
         rm -rf "$BASE_DIR"

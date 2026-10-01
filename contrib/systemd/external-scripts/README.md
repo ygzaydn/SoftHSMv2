@@ -1,7 +1,7 @@
 # External-system scripts (not part of the HSM's trust boundary)
 
 Everything in this directory represents work that happens **outside**
-`softhsm2-milenaged` and outside the SoftHSM token — the "external
+`softhsm-gsm` and outside the SoftHSM token — the "external
 secure provisioning authority" side of the Transport KEK flow described
 in `../METHODOLOGY.md` ("Provisioning"). In a real deployment these
 scripts (or equivalents) run on a separate system, not this HSM host —
@@ -15,7 +15,7 @@ to participate, and no more.
 ## `generate-transport-kek.sh`
 
 Generates the raw 32-byte (AES-256) Transport KEK and writes it to
-`/opt/softhsm2-milenaged/config/transport-kek` (mode 600, root-only —
+`/opt/softhsm2/etc/transport-kek` (mode 600, root-only —
 deliberately not readable by the `softhsm` user the daemon runs as,
 since the daemon never needs this file).
 
@@ -34,7 +34,7 @@ pip install cryptography   # once
 
 python3 wrap-transport-package.py \
     --supi imsi-999700000012345 \
-    --kek-file /opt/softhsm2-milenaged/config/transport-kek \
+    --kek-file /opt/softhsm2/etc/transport-kek \
     --k-hex 465B5CE8B199B49FAA5F0A2EE238A6BC \
     --opc-hex E8ED289DEBA952E4283B54E88E6183CA
 ```
@@ -60,11 +60,11 @@ local testing, since argv-based secrets land in shell history).
 # once per Transport KEK (not per subscriber):
 sudo ./generate-transport-kek.sh
 sudo softhsm2 import-transport-kek --input-fd 0 \
-    < /opt/softhsm2-milenaged/config/transport-kek
+    < /opt/softhsm2/etc/transport-kek
 
 # per subscriber:
 python3 wrap-transport-package.py --supi imsi-... \
-    --kek-file /opt/softhsm2-milenaged/config/transport-kek \
+    --kek-file /opt/softhsm2/etc/transport-kek \
     --k-hex <K> --opc-hex <OPc>
 # then paste transport_wrapped_k/transport_wrapped_opc into:
 sudo softhsm2 import-transport-wrapped --supi imsi-... \

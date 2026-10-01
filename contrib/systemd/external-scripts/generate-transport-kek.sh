@@ -12,18 +12,18 @@
 # included here so the same host can act as both sides for PoC/testing.
 #
 # usage: generate-transport-kek.sh [output-path]
-#   output-path defaults to /opt/softhsm2-milenaged/config/transport-kek
+#   output-path defaults to /opt/softhsm2/etc/transport-kek
 #
 # After running this:
 #   1. Import the SAME raw value into the HSM (this makes it
 #      unextractable from that point on):
 #        sudo softhsm2 import-transport-kek --input-fd 0 \
-#            < /opt/softhsm2-milenaged/config/transport-kek
+#            < /opt/softhsm2/etc/transport-kek
 #   2. Use wrap-transport-package.py, pointed at the same file, on
 #      whatever system will be wrapping subscriber K/OPc.
 set -euo pipefail
 
-OUT="${1:-/opt/softhsm2-milenaged/config/transport-kek}"
+OUT="${1:-/opt/softhsm2/etc/transport-kek}"
 
 if [ -e "$OUT" ]; then
     echo "error: $OUT already exists -- refusing to overwrite a Transport KEK that may already be in use." >&2

@@ -68,8 +68,26 @@ if(WITH_MILENAGE_PLAINTEXT_PROVISIONING)
                      $<TARGET_FILE:softhsm2>
                      $<TARGET_FILE:softhsm2-util>
                      $<TARGET_FILE:softhsm2-milenage>
-                     $<TARGET_FILE:softhsm2-milenaged>
+                     $<TARGET_FILE:softhsm-gsm>
                      $<TARGET_FILE:milenage-daemon-tcp-client-test>
+             )
+    add_test(NAME milenage-daemon-unix-test
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_daemon_ctest.sh
+                     $<TARGET_FILE:softhsm2>
+                     $<TARGET_FILE:softhsm2-util>
+                     $<TARGET_FILE:softhsm2-milenage>
+                     $<TARGET_FILE:softhsm-gsm>
+                     $<TARGET_FILE:milenage-daemon-tcp-client-test>
+                     unix
+             )
+    add_test(NAME milenage-daemon-dual-listener-test
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_daemon_ctest.sh
+                     $<TARGET_FILE:softhsm2>
+                     $<TARGET_FILE:softhsm2-util>
+                     $<TARGET_FILE:softhsm2-milenage>
+                     $<TARGET_FILE:softhsm-gsm>
+                     $<TARGET_FILE:milenage-daemon-tcp-client-test>
+                     both
              )
 endif()
 

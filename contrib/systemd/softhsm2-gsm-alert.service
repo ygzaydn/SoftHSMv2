@@ -1,0 +1,16 @@
+[Unit]
+Description=Alert on softhsm-gsm failure
+# Triggered by softhsm2-gsm.service's OnFailure=. Only fires on an
+# actual failed state (crash, non-zero exit) -- not on ordinary manual
+# stop/restart, since those don't leave the unit in "failed".
+
+[Service]
+Type=oneshot
+# Default: broadcast to every logged-in terminal and write a high-priority
+# journal entry (visible to `journalctl -p err`, log aggregators watching
+# the journal, etc.). No external dependency (mail server, webhook) is
+# assumed -- replace/extend this ExecStart with your own notification
+# command (e.g. curl a webhook, `mail`, `systemd-cat` to a SIEM pipe) if
+# you have somewhere better for this to go.
+ExecStart=/usr/bin/wall "softhsm2-gsm.service has FAILED on %H -- 5G-AKA authentication for HSM-backed subscribers is down. Check: journalctl -u softhsm-gsm -n 50"
+ExecStart=/usr/bin/logger -p auth.err -t softhsm-gsm-alert "softhsm2-gsm.service failed on %H"

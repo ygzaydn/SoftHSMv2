@@ -24,12 +24,12 @@ set -euo pipefail
 REAL_CLI=/usr/local/bin/softhsm2-milenage
 UTIL=/usr/local/bin/softhsm2-util
 MODULE=/usr/local/lib/softhsm/libsofthsm2.so
-BASE_DIR=/opt/softhsm2-milenaged
-CONF="$BASE_DIR/config/softhsm2.conf"
-PIN_FILE="$BASE_DIR/config/milenaged-pin"
-ENV_FILE="$BASE_DIR/config/milenaged.env"
+BASE_DIR=/opt/softhsm2
+CONF="$BASE_DIR/etc/softhsm2.conf"
+PIN_FILE="$BASE_DIR/etc/gsm-pin"
+ENV_FILE="$BASE_DIR/etc/gsm.env"
 TOKEN_DIR="$BASE_DIR/tokens"
-LOG_FILE="$BASE_DIR/logs/softhsm2-milenaged.log"
+LOG_FILE="$BASE_DIR/logs/softhsm-gsm.log"
 
 TOKEN_LABEL=open5gs-milenage
 LISTEN_ADDR=""
@@ -48,13 +48,16 @@ fi
 if [ "$1" = "summary" ] || [ "$1" = "--summary" ]; then
     echo "== Service =="
     if command -v systemctl >/dev/null 2>&1; then
-        state="$(systemctl is-active softhsm2-milenaged 2>/dev/null || true)"
-        enabled="$(systemctl is-enabled softhsm2-milenaged 2>/dev/null || true)"
-        echo "  softhsm2-milenaged.service: ${state:-unknown} (${enabled:-unknown})"
+        state="$(systemctl is-active softhsm2-gsm.service 2>/dev/null || true)"
+        enabled="$(systemctl is-enabled softhsm2-gsm.service 2>/dev/null || true)"
+        echo "  softhsm2-gsm.service: ${state:-unknown} (${enabled:-unknown})"
     else
         echo "  systemctl not available on this host"
     fi
     echo "  listening on: ${LISTEN_ADDR:-<unset>}:${LISTEN_PORT:-<unset>}  (from $ENV_FILE)"
+    if [ -n "${LISTEN_UNIX:-}" ]; then
+        echo "  Unix socket: $LISTEN_UNIX"
+    fi
 
     echo "== Token =="
     echo "  configured label: $TOKEN_LABEL  (from $ENV_FILE)"

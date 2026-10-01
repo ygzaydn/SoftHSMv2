@@ -1,22 +1,32 @@
 [Unit]
-Description=SoftHSM Milenage 5G-AKA TCP daemon (S5GM)
+Description=SoftHSM Milenage 5G-AKA daemon (S5GM)
 After=network-online.target
 Wants=network-online.target
+# Fires only once this unit gives up retrying (Restart=on-failure below
+# already retries transient crashes on its own; OnFailure= triggers
+# when systemd's default start-rate-limit is exceeded and the unit
+# settles into "failed" -- i.e. a persistent, not transient, problem).
+OnFailure=softhsm2-gsm-alert.service
 
 [Service]
 Type=simple
 User=softhsm
 Group=softhsm
 
-EnvironmentFile=/opt/softhsm2-milenaged/config/milenaged.env
-Environment=SOFTHSM2_CONF=/opt/softhsm2-milenaged/config/softhsm2.conf
+Environment=LISTEN_UNIX=/run/softhsm-gsm/gsm.sock
+EnvironmentFile=/opt/softhsm2/etc/gsm.env
+Environment=SOFTHSM2_CONF=/opt/softhsm2/etc/softhsm2.conf
 
-ExecStart=/usr/local/bin/softhsm2-milenaged \
+ExecStart=/usr/local/bin/softhsm-gsm \
     --module /usr/local/lib/softhsm/libsofthsm2.so \
     --token-label ${TOKEN_LABEL} \
-    --pin-file /opt/softhsm2-milenaged/config/milenaged-pin \
+    --pin-file /opt/softhsm2/etc/gsm-pin \
     --listen-addr ${LISTEN_ADDR} \
-    --listen-port ${LISTEN_PORT}
+    --listen-port ${LISTEN_PORT} \
+    --listen-unix ${LISTEN_UNIX}
+
+RuntimeDirectory=softhsm-gsm
+RuntimeDirectoryMode=0770
 
 Restart=on-failure
 RestartSec=2s
@@ -27,7 +37,7 @@ RestartSec=2s
 # because systemd's own Exec*= argv parser does not treat single quotes
 # as quoting -- an inline single-quoted shell script gets word-split by
 # systemd itself before bash ever sees it.
-ExecStopPost=/usr/local/bin/softhsm2-milenaged-rotate-log
+ExecStopPost=/usr/local/bin/softhsm-gsm-rotate-log
 
 # Hardening. The daemon only needs: read its config/PIN, read/write the
 # token store and its own logs, and listen on a TCP socket -- nothing else.
@@ -39,19 +49,19 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 
-# install.sh creates /opt/softhsm2-milenaged/{tokens,logs} up front with
+# install.sh creates /opt/softhsm2/{tokens,logs} up front with
 # the right ownership, so these paths are guaranteed to exist before
 # ExecStart runs -- unlike LogsDirectory=, which was observed to not
 # always be honored before ExecStart on every systemd version/config.
-ReadWritePaths=/opt/softhsm2-milenaged/tokens /opt/softhsm2-milenaged/logs
+ReadWritePaths=/opt/softhsm2/tokens /opt/softhsm2/logs /run/softhsm-gsm
 
-StandardOutput=append:/opt/softhsm2-milenaged/logs/softhsm2-milenaged.log
-StandardError=append:/opt/softhsm2-milenaged/logs/softhsm2-milenaged.log
+StandardOutput=append:/opt/softhsm2/logs/softhsm-gsm.log
+StandardError=append:/opt/softhsm2/logs/softhsm-gsm.log
 
 [Install]
 WantedBy=multi-user.target

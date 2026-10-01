@@ -966,14 +966,14 @@ is simply the recommended alternative in help text and warnings); no
 change was needed to `import-transport-wrapped` itself since it never
 accepted plaintext input in the first place.
 
-## 21. Network daemon (softhsm2-milenaged)
+## 21. Network daemon (softhsm-gsm)
 
 Added by explicit request: HSM and 5G core may run on different
 hosts/VMs, so an in-process PKCS#11 call is not enough. TLS was
 explicitly deferred by request ("TLS'i boşverip şimdilik ilerleyelim");
 plain TCP, 1 UDM : 1 HSM, address configured as `ip:port`.
 
-`src/bin/milenage/softhsm2-milenaged.cpp` dlopen's the PKCS#11 module
+`src/bin/milenage/softhsm-gsm.cpp` dlopen's the PKCS#11 module
 once at startup (same approach as the CLI), logs in, resolves the
 Master Storage Key (and Transport KEK, if `WITH_MILENAGE_TRANSPORT_IMPORT`
 and one exists) once, then listens on a plain TCP socket. Framing:

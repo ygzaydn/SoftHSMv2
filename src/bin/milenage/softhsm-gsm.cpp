@@ -1,5 +1,5 @@
 /*
- * softhsm2-milenaged: plain-TCP network front-end for the Milenage /
+ * softhsm-gsm: plain-TCP network front-end for the Milenage /
  * 5G-AKA vendor PKCS#11 mechanisms, so a 5G core component (e.g. an
  * Open5GS UDM) running on a different host/VM than SoftHSM can reach
  * it. See doc/MILENAGE-5G-AKA-DESIGN.md section 21.
@@ -69,6 +69,11 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
+#include <poll.h>
+#include <cerrno>
+#include <cstddef>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -91,7 +96,7 @@ namespace {
 
 void die(const std::string &msg)
 {
-    std::cerr << "softhsm2-milenaged: error: " << msg << "\n";
+    std::cerr << "softhsm-gsm: error: " << msg << "\n";
     std::exit(1);
 }
 
@@ -140,6 +145,7 @@ struct Options {
 #endif
     std::string listenAddr = "127.0.0.1";
     int listenPort = -1;
+    std::string listenUnix;
 };
 
 std::string readPin(const Options &opts)
@@ -524,8 +530,9 @@ bool handleRequest(Pkcs11Context &ctx, int connFd)
 void printUsage()
 {
     std::cerr <<
-        "usage: softhsm2-milenaged --module <path> --token-label <label> \\\n"
-        "         --pin-file <path> --listen-port <port> [--listen-addr <ip>] \\\n"
+        "usage: softhsm-gsm --module <path> --token-label <label> \\\n"
+        "         --pin-file <path> [--listen-port <port> [--listen-addr <ip>]] \\\n"
+        "         [--listen-unix <path>] \\\n"
         "         [--master-key-label <label>] [--master-key-id <hex-byte>]\n"
 #ifdef WITH_MILENAGE_TRANSPORT_IMPORT
         "         [--transport-kek-label <label>] [--transport-kek-id <hex-byte>]\n"
@@ -562,45 +569,89 @@ int main(int argc, char **argv)
 #endif
         else if (a == "--listen-addr") opts.listenAddr = next();
         else if (a == "--listen-port") opts.listenPort = (int)strtol(next().c_str(), nullptr, 10);
+        else if (a == "--listen-unix") opts.listenUnix = next();
         else if (a == "--pin") die("--pin is refused for security reasons; use --pin-file or --pin-fd");
         else { printUsage(); die("unknown option: " + a); }
     }
 
-    if (opts.module.empty() || opts.listenPort < 0) { printUsage(); die("--module and --listen-port are required"); }
+    if (opts.module.empty() || (opts.listenUnix.empty() && opts.listenPort < 0)) {
+        printUsage(); die("--module and a listening endpoint are required");
+    }
 
     Pkcs11Context ctx;
     setupPkcs11(ctx, opts);
 
-    int listenFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenFd < 0) die("socket() failed");
-    int one = 1;
-    setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)opts.listenPort);
-    if (inet_pton(AF_INET, opts.listenAddr.c_str(), &addr.sin_addr) != 1)
-        die("invalid --listen-addr");
-
-    if (bind(listenFd, (struct sockaddr*)&addr, sizeof(addr)) != 0) die("bind() failed");
-    if (listen(listenFd, 16) != 0) die("listen() failed");
-
-    logInfo("listening on " + opts.listenAddr + ":" + std::to_string(opts.listenPort) +
-            " (PLAINTEXT TCP, no TLS -- trusted-network-only, see file header)");
+    int unixFd = -1;
+    int tcpFd = -1;
+    if (!opts.listenUnix.empty()) {
+        unixFd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (unixFd < 0) die("Unix socket() failed");
+        struct sockaddr_un addr = {};
+        addr.sun_family = AF_UNIX;
+        if (opts.listenUnix[0] != '/' || opts.listenUnix.size() >= sizeof(addr.sun_path))
+            die("--listen-unix must be an absolute path shorter than sun_path");
+        memcpy(addr.sun_path, opts.listenUnix.c_str(), opts.listenUnix.size() + 1);
+        struct stat st;
+        if (lstat(addr.sun_path, &st) == 0) {
+            if (!S_ISSOCK(st.st_mode)) die("Unix socket path already exists and is not a socket");
+            int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+            int result = connect(probe, (struct sockaddr*)&addr, sizeof(addr));
+            int error = errno;
+            close(probe);
+            if (result == 0 || error != ECONNREFUSED)
+                die("Unix socket path is already in use");
+            if (unlink(addr.sun_path) != 0) die("could not remove stale Unix socket");
+        } else if (errno != ENOENT) die("could not inspect Unix socket path");
+        mode_t oldMask = umask(0117); // socket mode 0660
+        int result = bind(unixFd, (struct sockaddr*)&addr,
+                          offsetof(struct sockaddr_un, sun_path) + opts.listenUnix.size() + 1);
+        umask(oldMask);
+        if (result != 0) die("Unix socket bind() failed");
+        if (listen(unixFd, 16) != 0) die("Unix socket listen() failed");
+        logInfo("listening on Unix socket " + opts.listenUnix);
+    }
+    if (opts.listenPort >= 0) {
+        tcpFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (tcpFd < 0) die("TCP socket() failed");
+        int one = 1;
+        setsockopt(tcpFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        struct sockaddr_in addr = {};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((uint16_t)opts.listenPort);
+        if (inet_pton(AF_INET, opts.listenAddr.c_str(), &addr.sin_addr) != 1)
+            die("invalid --listen-addr");
+        if (bind(tcpFd, (struct sockaddr*)&addr, sizeof(addr)) != 0) die("TCP bind() failed");
+        if (listen(tcpFd, 16) != 0) die("TCP listen() failed");
+        logInfo("listening on " + opts.listenAddr + ":" + std::to_string(opts.listenPort) +
+                " (PLAINTEXT TCP, no TLS -- trusted-network-only, see file header)");
+    }
 
     for (;;) {
-        struct sockaddr_in peer;
+        struct pollfd listeners[2];
+        nfds_t count = 0;
+        if (tcpFd >= 0) listeners[count++] = {tcpFd, POLLIN, 0};
+        if (unixFd >= 0) listeners[count++] = {unixFd, POLLIN, 0};
+        if (poll(listeners, count, -1) < 0) {
+            if (errno == EINTR) continue;
+            die("poll() failed");
+        }
+        for (nfds_t i = 0; i < count; ++i) {
+            if (!(listeners[i].revents & POLLIN)) continue;
+            bool unixSocket = listeners[i].fd == unixFd;
+        struct sockaddr_storage peer;
         socklen_t peerLen = sizeof(peer);
-        int connFd = accept(listenFd, (struct sockaddr*)&peer, &peerLen);
+        int connFd = accept(listeners[i].fd, (struct sockaddr*)&peer, &peerLen);
         if (connFd < 0) continue;
 
-        int noDelay = 1;
-        setsockopt(connFd, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
-
-        char peerStr[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &peer.sin_addr, peerStr, sizeof(peerStr));
-        logInfo(std::string("connection from ") + peerStr + ":" + std::to_string(ntohs(peer.sin_port)));
+        if (unixSocket) logInfo("connection on Unix socket");
+        else {
+            int noDelay = 1;
+            setsockopt(connFd, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+            const struct sockaddr_in *inetPeer = (const struct sockaddr_in*)&peer;
+            char peerStr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &inetPeer->sin_addr, peerStr, sizeof(peerStr));
+            logInfo(std::string("connection from ") + peerStr + ":" + std::to_string(ntohs(inetPeer->sin_port)));
+        }
 
         while (handleRequest(ctx, connFd)) {
             // keep serving requests on this connection until it closes
@@ -608,6 +659,7 @@ int main(int argc, char **argv)
         }
         close(connFd);
         logInfo("connection closed");
+        }
     }
 
     return 0;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CTest wrapper for softhsm2-milenaged: initializes an isolated token,
+# CTest wrapper for softhsm-gsm: initializes an isolated token,
 # provisions one test subscriber locally (via softhsm2-milenage, not
 # over the network), starts the daemon in the background on a free
 # port, runs the TCP client test against it, then tears everything
@@ -7,7 +7,7 @@
 # directory.
 #
 #   run_daemon_ctest.sh <module.so> <softhsm2-util> <softhsm2-milenage> \
-#                        <softhsm2-milenaged> <daemon-tcp-client-test>
+#                        <softhsm-gsm> <daemon-tcp-client-test>
 set -uo pipefail
 
 MODULE="$1"
@@ -15,6 +15,7 @@ UTIL="$2"
 CLI="$3"
 DAEMON="$4"
 CLIENT="$5"
+MODE="${6:-tcp}"
 
 WORKDIR="$(mktemp -d /tmp/milenage-daemon-ctest.XXXXXX)"
 DAEMON_PID=""
@@ -59,13 +60,25 @@ WRAPPED_OPC=$(python3 -c "import json; print(json.load(open('$WORKDIR/sub.json')
 
 PORT=$((20000 + (RANDOM % 20000)))
 
-"$DAEMON" --module "$MODULE" --token-label daemon-ctest --pin-file "$WORKDIR/pin.txt" \
-	--listen-addr 127.0.0.1 --listen-port "$PORT" > "$WORKDIR/daemon.log" 2>&1 &
+if [ "$MODE" = both ]; then
+	"$DAEMON" --module "$MODULE" --token-label daemon-ctest --pin-file "$WORKDIR/pin.txt" \
+		--listen-addr 127.0.0.1 --listen-port "$PORT" \
+		--listen-unix "$WORKDIR/gsm.sock" > "$WORKDIR/daemon.log" 2>&1 &
+elif [ "$MODE" = unix ]; then
+	"$DAEMON" --module "$MODULE" --token-label daemon-ctest --pin-file "$WORKDIR/pin.txt" \
+		--listen-unix "$WORKDIR/gsm.sock" > "$WORKDIR/daemon.log" 2>&1 &
+else
+	"$DAEMON" --module "$MODULE" --token-label daemon-ctest --pin-file "$WORKDIR/pin.txt" \
+		--listen-addr 127.0.0.1 --listen-port "$PORT" > "$WORKDIR/daemon.log" 2>&1 &
+fi
 DAEMON_PID=$!
 
 # Wait for the daemon to start listening (poll, generous timeout).
 for i in $(seq 1 50); do
-	if grep -q "listening on" "$WORKDIR/daemon.log" 2>/dev/null; then
+	if [ "$MODE" = both ]; then
+		grep -q "listening on Unix socket" "$WORKDIR/daemon.log" 2>/dev/null && \
+		grep -q "listening on 127.0.0.1:" "$WORKDIR/daemon.log" 2>/dev/null && break
+	elif grep -q "listening on" "$WORKDIR/daemon.log" 2>/dev/null; then
 		break
 	fi
 	if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
@@ -76,7 +89,14 @@ for i in $(seq 1 50); do
 	sleep 0.1
 done
 
-"$CLIENT" 127.0.0.1 "$PORT" "$SUPI" "$WRAPPED_K" "$WRAPPED_OPC"
+if [ "$MODE" = both ]; then
+	"$CLIENT" 127.0.0.1 "$PORT" "$SUPI" "$WRAPPED_K" "$WRAPPED_OPC" && \
+	"$CLIENT" "unix:$WORKDIR/gsm.sock" 0 "$SUPI" "$WRAPPED_K" "$WRAPPED_OPC"
+elif [ "$MODE" = unix ]; then
+	"$CLIENT" "unix:$WORKDIR/gsm.sock" 0 "$SUPI" "$WRAPPED_K" "$WRAPPED_OPC"
+else
+	"$CLIENT" 127.0.0.1 "$PORT" "$SUPI" "$WRAPPED_K" "$WRAPPED_OPC"
+fi
 RESULT=$?
 
 echo "--- daemon log ---"

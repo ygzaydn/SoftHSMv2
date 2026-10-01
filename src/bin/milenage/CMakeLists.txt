@@ -12,10 +12,10 @@ add_executable(${PROJECT_NAME} softhsm2-milenage.cpp)
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
 target_link_libraries(${PROJECT_NAME} ${CMAKE_DL_LIBS})
 
-add_executable(${PROJECT_NAME}d softhsm2-milenaged.cpp)
-target_compile_options(${PROJECT_NAME}d PRIVATE ${COMPILE_OPTIONS})
-target_link_libraries(${PROJECT_NAME}d ${CMAKE_DL_LIBS})
+add_executable(softhsm-gsm softhsm-gsm.cpp)
+target_compile_options(softhsm-gsm PRIVATE ${COMPILE_OPTIONS})
+target_link_libraries(softhsm-gsm ${CMAKE_DL_LIBS})
 
-install(TARGETS ${PROJECT_NAME} ${PROJECT_NAME}d
+install(TARGETS ${PROJECT_NAME} softhsm-gsm
         DESTINATION ${CMAKE_INSTALL_BINDIR}
         )

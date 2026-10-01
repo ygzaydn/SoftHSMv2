@@ -1,9 +1,9 @@
-// End-to-end test for softhsm2-milenaged over a real TCP connection.
+// End-to-end test for softhsm-gsm over a real TCP connection.
 // Does NOT start the daemon itself -- see
 // src/lib/milenage/test/run_daemon_ctest.sh, which provisions a
 // token, starts the daemon in the background, runs this client
 // against 127.0.0.1:<port>, and tears everything down. Speaks the
-// daemon TCP framing documented in softhsm2-milenaged.cpp's header
+// daemon TCP framing documented in softhsm-gsm.cpp's header
 // comment (u32be length | u8 status | payload), wrapping the same
 // S5GM wire format used everywhere else in this codebase.
 
@@ -14,6 +14,7 @@
 #include <vector>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -112,6 +113,17 @@ static std::vector<uint8_t> fromBase64(const std::string &s)
 
 static int connectTo(const std::string &host, int port)
 {
+    if (host.compare(0, 5, "unix:") == 0) {
+        std::string path = host.substr(5);
+        struct sockaddr_un addr = {};
+        addr.sun_family = AF_UNIX;
+        if (path.size() >= sizeof(addr.sun_path)) return -1;
+        memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) { close(fd); return -1; }
+        return fd;
+    }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     struct sockaddr_in addr;

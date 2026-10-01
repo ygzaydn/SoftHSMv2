@@ -34,13 +34,13 @@ definition this must match byte-for-byte):
 usage:
   echo -n '<32 raw bytes: 16-byte K followed by 16-byte OPc>' | \\
       wrap-transport-package.py --supi imsi-999700000012345 \\
-          --kek-file /opt/softhsm2-milenaged/config/transport-kek
+          --kek-file /opt/softhsm2/etc/transport-kek
 
   # or, more conveniently, from hex:
   wrap-transport-package.py --supi imsi-999700000012345 \\
       --k-hex 465B5CE8B199B49FAA5F0A2EE238A6BC \\
       --opc-hex E8ED289DEBA952E4283B54E88E6183CA \\
-      --kek-file /opt/softhsm2-milenaged/config/transport-kek
+      --kek-file /opt/softhsm2/etc/transport-kek
 
 Prints a JSON object with transport_wrapped_k / transport_wrapped_opc
 (base64) -- feed these straight to:
@@ -124,7 +124,7 @@ def main() -> int:
     p.add_argument("--supi", required=True, help="e.g. imsi-999700000012345")
     p.add_argument("--kek-file", required=True,
                     help="path to the raw 32-byte Transport KEK "
-                         "(e.g. /opt/softhsm2-milenaged/config/transport-kek)")
+                         "(e.g. /opt/softhsm2/etc/transport-kek)")
     p.add_argument("--k-hex", help="16-byte K as 32 hex chars (omit to read from stdin instead)")
     p.add_argument("--opc-hex", help="16-byte OPc as 32 hex chars (omit to read from stdin instead)")
     p.add_argument("--transaction-id", default="",
