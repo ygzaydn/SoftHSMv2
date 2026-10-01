@@ -1,0 +1,8 @@
+# Copied to /opt/softhsm2/etc/softhsm2.conf (root:softhsm, mode 640).
+directories.tokendir = /opt/softhsm2/tokens
+objectstore.backend = file
+objectstore.umask = 0077
+log.level = INFO
+log.file = /opt/softhsm2/logs/softhsm-pkcs11.log
+slots.removable = false
+slots.mechanisms = ALL

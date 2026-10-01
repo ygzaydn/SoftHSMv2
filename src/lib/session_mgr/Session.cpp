@@ -32,6 +32,7 @@
 
 #include "CryptoFactory.h"
 #include "Session.h"
+#include <cstring>
 
 // Constructor
 Session::Session(Slot* inSlot, bool inIsReadWrite, CK_VOID_PTR inPApplication, CK_NOTIFY inNotify)
@@ -59,6 +60,11 @@ Session::Session(Slot* inSlot, bool inIsReadWrite, CK_VOID_PTR inPApplication, C
 	param = NULL;
 	paramLen = 0;
 	mechanismParam = NULL;
+	milenageMechanism = 0;
+	memset(milenageMasterKey, 0, sizeof(milenageMasterKey));
+	milenageKeyValid = false;
+	memset(milenageSecondaryKey, 0, sizeof(milenageSecondaryKey));
+	milenageSecondaryKeyValid = false;
 }
 
 // Constructor
@@ -87,6 +93,11 @@ Session::Session()
 	param = NULL;
 	paramLen = 0;
 	mechanismParam = NULL;
+	milenageMechanism = 0;
+	memset(milenageMasterKey, 0, sizeof(milenageMasterKey));
+	milenageKeyValid = false;
+	memset(milenageSecondaryKey, 0, sizeof(milenageSecondaryKey));
+	milenageSecondaryKeyValid = false;
 }
 
 // Destructor
@@ -242,6 +253,21 @@ void Session::resetOp()
 		}
 		CryptoFactory::i()->recycleMacAlgorithm(macOp);
 		macOp = NULL;
+	}
+
+	if (milenageKeyValid)
+	{
+		// Secure zeroization of the Master Storage Key / Transport KEK
+		// value(s) held for the duration of a Milenage vendor-mechanism
+		// operation.
+		memset(milenageMasterKey, 0, sizeof(milenageMasterKey));
+		milenageKeyValid = false;
+		milenageMechanism = 0;
+	}
+	if (milenageSecondaryKeyValid)
+	{
+		memset(milenageSecondaryKey, 0, sizeof(milenageSecondaryKey));
+		milenageSecondaryKeyValid = false;
 	}
 
 	operation = SESSION_OP_NONE;
@@ -476,4 +502,32 @@ void Session::setSymmetricKey(SymmetricKey* inSymmetricKey)
 SymmetricKey* Session::getSymmetricKey()
 {
 	return symmetricKey;
+}
+
+void Session::setMilenageOp(CK_MECHANISM_TYPE inMechanism, const unsigned char inMasterKey[32])
+{
+	memcpy(milenageMasterKey, inMasterKey, sizeof(milenageMasterKey));
+	milenageMechanism = inMechanism;
+	milenageKeyValid = true;
+}
+
+CK_MECHANISM_TYPE Session::getMilenageMechanism()
+{
+	return milenageKeyValid ? milenageMechanism : 0;
+}
+
+const unsigned char* Session::getMilenageMasterKey()
+{
+	return milenageKeyValid ? milenageMasterKey : NULL;
+}
+
+void Session::setMilenageSecondaryKey(const unsigned char inKey[32])
+{
+	memcpy(milenageSecondaryKey, inKey, sizeof(milenageSecondaryKey));
+	milenageSecondaryKeyValid = true;
+}
+
+const unsigned char* Session::getMilenageSecondaryKey()
+{
+	return milenageSecondaryKeyValid ? milenageSecondaryKey : NULL;
 }

@@ -85,6 +85,12 @@
 #include "P11Objects.h"
 #include "odd.h"
 
+#ifdef WITH_MILENAGE
+#include "softhsm_milenage.h"
+#include "WireCodec.h"
+#include "MilenageService.h"
+#endif
+
 #if defined(WITH_OPENSSL)
 #include "OSSLCryptoFactory.h"
 #else
@@ -877,6 +883,16 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_CONCATENATE_DATA_AND_BASE"] = CKM_CONCATENATE_DATA_AND_BASE;
 	t["CKM_CONCATENATE_BASE_AND_DATA"] = CKM_CONCATENATE_BASE_AND_DATA;
 	t["CKM_CONCATENATE_BASE_AND_KEY"] = CKM_CONCATENATE_BASE_AND_KEY;
+#ifdef WITH_MILENAGE
+	t["CKM_SOFTHSM_5G_HE_AV_WRAPPED"] = CKM_SOFTHSM_5G_HE_AV_WRAPPED;
+	t["CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED"] = CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED;
+#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
+	t["CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED"] = CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED;
+#endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+	t["CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED"] = CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED;
+#endif
+#endif
 
 	supportedMechanisms.clear();
 	for (auto it = t.begin(); it != t.end(); ++it)
@@ -4107,6 +4123,27 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 	}
 }
 
+#ifdef WITH_MILENAGE
+static bool isMilenageMechanism(CK_MECHANISM_PTR pMechanism)
+{
+	if (pMechanism == NULL_PTR) return false;
+
+	switch (pMechanism->mechanism) {
+		case CKM_SOFTHSM_5G_HE_AV_WRAPPED:
+		case CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED:
+#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
+		case CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED:
+#endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+		case CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED:
+#endif
+			return true;
+		default:
+			return false;
+	}
+}
+#endif
+
 // MacAlgorithm version of C_SignInit
 CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
@@ -4806,8 +4843,370 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 }
 
 // Initialise a signing operation using the specified key and mechanism
+#ifdef WITH_MILENAGE
+// Verifies that `key` matches the Master Storage Key template required by
+// doc/MILENAGE-5G-AKA-DESIGN.md section 5.1, independently of whatever
+// mechanism/CKA_SIGN checks the caller already performed. This is
+// deliberately redundant with CKA_ALLOWED_MECHANISMS enforcement
+// (isMechanismPermitted): a key that merely happens to have the right
+// mechanism list but the wrong other attributes (e.g. CKA_EXTRACTABLE
+// left TRUE by a misconfigured provisioning step) must still be
+// rejected here.
+// Verifies the shared attribute shape used by both the Master Storage
+// Key (section 5.1) and the Transport KEK (section 5.2): AES-256,
+// non-extractable, sensitive, non-modifiable/copyable, unusable via
+// ordinary encrypt/decrypt/wrap/unwrap/derive, sign-capable, and
+// matching the given label/id constants exactly.
+static bool isValidMilenageKeyTemplate(Token* token, OSObject* key,
+                                        const std::string& expectedLabel, uint8_t expectedId)
+{
+#define MILENAGE_KEY_CHECK(cond, name) \
+	do { if (!(cond)) { return false; } } while (0)
+
+	// For a CKA_PRIVATE object, every byte-string attribute -- not just
+	// CKA_VALUE -- is stored encrypted at rest (the generic default in
+	// P11Attribute::updateAttr()). CKA_LABEL and CKA_ID must therefore
+	// be decrypted the same way CKA_VALUE is (see getSymmetricKey())
+	// before they can be compared against the expected constants.
+	bool isKeyPrivate = key->getBooleanValue(CKA_PRIVATE, false);
+
+	MILENAGE_KEY_CHECK(key->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) == CKO_SECRET_KEY, "CKA_CLASS");
+	MILENAGE_KEY_CHECK(key->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) == CKK_AES, "CKA_KEY_TYPE");
+	// Note: CKA_VALUE is not checked here -- for a CKA_PRIVATE object it
+	// is stored encrypted at rest, so its stored byte length is not the
+	// plaintext key length. The actual 32-byte length requirement is
+	// enforced after decryption via getSymmetricKey() in the caller.
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_EXTRACTABLE, true), "CKA_EXTRACTABLE");
+	MILENAGE_KEY_CHECK(key->getBooleanValue(CKA_SENSITIVE, false), "CKA_SENSITIVE");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_MODIFIABLE, true), "CKA_MODIFIABLE");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_COPYABLE, true), "CKA_COPYABLE");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_ENCRYPT, false), "CKA_ENCRYPT");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_DECRYPT, false), "CKA_DECRYPT");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_WRAP, false), "CKA_WRAP");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_UNWRAP, false), "CKA_UNWRAP");
+	MILENAGE_KEY_CHECK(!key->getBooleanValue(CKA_DERIVE, false), "CKA_DERIVE");
+	MILENAGE_KEY_CHECK(key->getBooleanValue(CKA_SIGN, false), "CKA_SIGN");
+
+	ByteString label = key->getByteStringValue(CKA_LABEL);
+	if (isKeyPrivate)
+	{
+		ByteString plainLabel;
+		if (!token->decrypt(label, plainLabel))
+			return false;
+		label = plainLabel;
+	}
+	MILENAGE_KEY_CHECK(label.size() == expectedLabel.size() &&
+	    memcmp(label.const_byte_str(), expectedLabel.data(), expectedLabel.size()) == 0, "CKA_LABEL");
+
+	ByteString id = key->getByteStringValue(CKA_ID);
+	if (isKeyPrivate)
+	{
+		ByteString plainId;
+		if (!token->decrypt(id, plainId))
+			return false;
+		id = plainId;
+	}
+	MILENAGE_KEY_CHECK(id.size() == 1 && id[0] == expectedId, "CKA_ID");
+
+#undef MILENAGE_KEY_CHECK
+	return true;
+}
+
+static bool isValidMilenageMasterKey(Token* token, OSObject* key)
+{
+	static const std::string expectedLabel = SOFTHSM_MILENAGE_MASTER_KEY_LABEL;
+	return isValidMilenageKeyTemplate(token, key, expectedLabel, SOFTHSM_MILENAGE_MASTER_KEY_ID_BYTE);
+}
+
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+static bool isValidTransportKek(Token* token, OSObject* key)
+{
+	static const std::string expectedLabel = SOFTHSM_MILENAGE_TRANSPORT_KEK_LABEL;
+	return isValidMilenageKeyTemplate(token, key, expectedLabel, SOFTHSM_MILENAGE_TRANSPORT_KEK_ID_BYTE);
+}
+#endif
+
+// Fixed response sizes for the output-size-query calling convention
+// (pSignature == NULL_PTR): must be computable without unwrapping any
+// credential or generating RAND (design doc section 7 / spec section 15).
+// All three operations have a fixed-size response given this wire
+// format and the fixed 58-byte envelope plaintext used by
+// CredentialEnvelope, so this is exact, not an upper bound.
+static CK_ULONG milenageResponseSize(CK_MECHANISM_TYPE mechanism)
+{
+	// header(12) + TLV-header(6)*n + payload
+	switch (mechanism) {
+		case CKM_SOFTHSM_5G_HE_AV_WRAPPED:
+			// RAND(16) + AUTN(16) + XRES*(16) + KAUSF(32), 4 TLVs
+			return 12 + 4 * 6 + (16 + 16 + 16 + 32);
+		case CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED:
+			// SQN_MS(6), 1 TLV
+			return 12 + 1 * 6 + 6;
+#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
+		case CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED:
+#endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+		case CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED:
+#endif
+#if defined(WITH_MILENAGE_PLAINTEXT_PROVISIONING) || defined(WITH_MILENAGE_TRANSPORT_IMPORT)
+		{
+			// AES-KWP output for a fixed 58-byte plaintext envelope:
+			// 8 + 8*ceil(58/8) = 8 + 64 = 72 bytes, wrapped_k and
+			// wrapped_opc, 2 TLVs. Same response shape for provision
+			// and transport import -- both end by wrapping under the
+			// Master Storage Key with the same fixed envelope.
+			const CK_ULONG wrappedLen = 8 + 8 * ((SOFTHSM_MILENAGE_ENVELOPE_PLAINTEXT_LEN + 7) / 8);
+			return 12 + 2 * 6 + 2 * wrappedLen;
+		}
+#endif
+		default:
+			return 0;
+	}
+}
+
+// Milenage / 5G-AKA version of C_SignInit
+CK_RV SoftHSM::MilenageSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
+{
+	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+
+	Session* session = (Session*)handleManager->getSession(hSession);
+	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	if (session->getOpType() != SESSION_OP_NONE) return CKR_OPERATION_ACTIVE;
+
+	Token* token = session->getToken();
+	if (token == NULL) return CKR_GENERAL_ERROR;
+
+	OSObject *key = (OSObject *)handleManager->getObject(hKey);
+	if (key == NULL_PTR || !key->isValid()) return CKR_OBJECT_HANDLE_INVALID;
+
+	CK_BBOOL isOnToken = key->getBooleanValue(CKA_TOKEN, false);
+	CK_BBOOL isPrivate = key->getBooleanValue(CKA_PRIVATE, true);
+
+	CK_RV rv = haveRead(session->getState(), isOnToken, isPrivate);
+	if (rv != CKR_OK)
+	{
+		if (rv == CKR_USER_NOT_LOGGED_IN)
+			INFO_MSG("User is not authorized");
+		return rv;
+	}
+
+	if (!key->getBooleanValue(CKA_SIGN, false))
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	if (!isMechanismPermitted(key, pMechanism->mechanism))
+		return CKR_MECHANISM_INVALID;
+
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+	if (pMechanism->mechanism == CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED)
+	{
+		// hKey is the Transport KEK here, not the Master Storage Key.
+		if (!isValidTransportKek(token, key))
+			return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+		// The Master Storage Key handle is supplied via the mechanism
+		// parameter (CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS) --
+		// standard PKCS#11 C_SignInit has no other way to pass a
+		// second key to a mechanism. It is independently re-validated
+		// against the Master Storage Key template below, exactly like
+		// every other Milenage mechanism does for its key.
+		if (pMechanism->pParameter == NULL_PTR ||
+		    pMechanism->ulParameterLen != sizeof(CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS))
+			return CKR_MECHANISM_PARAM_INVALID;
+		CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS* params =
+			(CK_SOFTHSM_MILENAGE_TRANSPORT_IMPORT_PARAMS*)pMechanism->pParameter;
+
+		OSObject *masterKeyObj = (OSObject *)handleManager->getObject(params->masterKeyHandle);
+		if (masterKeyObj == NULL_PTR || !masterKeyObj->isValid())
+			return CKR_KEY_HANDLE_INVALID;
+
+		CK_BBOOL masterIsOnToken = masterKeyObj->getBooleanValue(CKA_TOKEN, false);
+		CK_BBOOL masterIsPrivate = masterKeyObj->getBooleanValue(CKA_PRIVATE, true);
+		CK_RV masterRv = haveRead(session->getState(), masterIsOnToken, masterIsPrivate);
+		if (masterRv != CKR_OK)
+			return masterRv;
+
+		if (!masterKeyObj->getBooleanValue(CKA_SIGN, false))
+			return CKR_KEY_FUNCTION_NOT_PERMITTED;
+		if (!isMechanismPermitted(masterKeyObj, pMechanism->mechanism))
+			return CKR_MECHANISM_INVALID;
+		if (!isValidMilenageMasterKey(token, masterKeyObj))
+			return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+		SymmetricKey rawTransportKey, rawMasterKey;
+		if (getSymmetricKey(&rawTransportKey, token, key) != CKR_OK ||
+		    getSymmetricKey(&rawMasterKey, token, masterKeyObj) != CKR_OK)
+			return CKR_GENERAL_ERROR;
+		if (rawTransportKey.getKeyBits().size() != SOFTHSM_MILENAGE_TRANSPORT_KEK_VALUE_LEN ||
+		    rawMasterKey.getKeyBits().size() != SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN)
+			return CKR_GENERAL_ERROR;
+
+		unsigned char transportKek[SOFTHSM_MILENAGE_TRANSPORT_KEK_VALUE_LEN];
+		unsigned char masterKey[SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN];
+		memcpy(transportKek, rawTransportKey.getKeyBits().const_byte_str(), sizeof(transportKek));
+		memcpy(masterKey, rawMasterKey.getKeyBits().const_byte_str(), sizeof(masterKey));
+
+		session->setOpType(SESSION_OP_MILENAGE);
+		session->setMilenageOp(pMechanism->mechanism, transportKek);
+		session->setMilenageSecondaryKey(masterKey);
+		session->setAllowMultiPartOp(false);
+		session->setAllowSinglePartOp(true);
+
+		memset(transportKek, 0, sizeof(transportKek));
+		memset(masterKey, 0, sizeof(masterKey));
+
+		return CKR_OK;
+	}
+#endif
+
+	if (!isValidMilenageMasterKey(token, key))
+		return CKR_KEY_FUNCTION_NOT_PERMITTED;
+
+	SymmetricKey rawKey;
+	if (getSymmetricKey(&rawKey, token, key) != CKR_OK)
+		return CKR_GENERAL_ERROR;
+
+	if (rawKey.getKeyBits().size() != SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN)
+		return CKR_GENERAL_ERROR;
+
+	unsigned char masterKey[SOFTHSM_MILENAGE_MASTER_KEY_VALUE_LEN];
+	memcpy(masterKey, rawKey.getKeyBits().const_byte_str(), sizeof(masterKey));
+
+	session->setOpType(SESSION_OP_MILENAGE);
+	session->setMilenageOp(pMechanism->mechanism, masterKey);
+	session->setAllowMultiPartOp(false);
+	session->setAllowSinglePartOp(true);
+
+	memset(masterKey, 0, sizeof(masterKey));
+
+	return CKR_OK;
+}
+
+// Milenage / 5G-AKA version of C_Sign
+CK_RV SoftHSM::MilenageSign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen)
+{
+	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+	if (pData == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	if (pulSignatureLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
+
+	Session* session = (Session*)handleManager->getSession(hSession);
+	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	if (session->getOpType() != SESSION_OP_MILENAGE || !session->getAllowSinglePartOp())
+	{
+		session->resetOp();
+		return CKR_OPERATION_NOT_INITIALIZED;
+	}
+
+	CK_MECHANISM_TYPE mechanism = session->getMilenageMechanism();
+	const unsigned char* masterKey = session->getMilenageMasterKey();
+	if (masterKey == NULL)
+	{
+		session->resetOp();
+		return CKR_OPERATION_NOT_INITIALIZED;
+	}
+
+	// Output-size query: must not unwrap any credential or generate
+	// RAND (design doc section 7 / spec section 15). Does not reset
+	// the operation, so a genuine follow-up C_Sign call can still
+	// complete it.
+	if (pSignature == NULL_PTR)
+	{
+		CK_ULONG size = milenageResponseSize(mechanism);
+		if (size == 0)
+		{
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+		}
+		*pulSignatureLen = size;
+		return CKR_OK;
+	}
+
+	std::vector<uint8_t> response;
+	milenage_service::Error svcErr;
+
+	switch (mechanism) {
+		case CKM_SOFTHSM_5G_HE_AV_WRAPPED:
+			svcErr = milenage_service::generate5gHeAv(pData, ulDataLen, masterKey, response);
+			break;
+		case CKM_SOFTHSM_MILENAGE_RESYNC_WRAPPED:
+			svcErr = milenage_service::resync(pData, ulDataLen, masterKey, response);
+			break;
+#ifdef WITH_MILENAGE_PLAINTEXT_PROVISIONING
+		case CKM_SOFTHSM_MILENAGE_PROVISION_WRAPPED:
+			svcErr = milenage_service::provision(pData, ulDataLen, masterKey, response);
+			break;
+#endif
+#ifdef WITH_MILENAGE_TRANSPORT_IMPORT
+		case CKM_SOFTHSM_MILENAGE_IMPORT_TRANSPORT_WRAPPED:
+		{
+			// Here session's "primary" key is the Transport KEK and
+			// the "secondary" key is the Master Storage Key -- see
+			// MilenageSignInit's transport-import branch.
+			const unsigned char* secondaryKey = session->getMilenageSecondaryKey();
+			if (secondaryKey == NULL)
+			{
+				session->resetOp();
+				return CKR_OPERATION_NOT_INITIALIZED;
+			}
+			svcErr = milenage_service::importTransportWrapped(pData, ulDataLen, masterKey, secondaryKey, response);
+			break;
+		}
+#endif
+		default:
+			session->resetOp();
+			return CKR_GENERAL_ERROR;
+	}
+
+	CK_RV rv;
+	switch (svcErr) {
+		case milenage_service::Error::OK:
+			rv = CKR_OK;
+			break;
+		case milenage_service::Error::SIGNATURE_INVALID:
+			rv = CKR_SIGNATURE_INVALID;
+			break;
+		case milenage_service::Error::CREDENTIAL_INVALID:
+		case milenage_service::Error::BAD_REQUEST:
+		default:
+			rv = CKR_GENERAL_ERROR;
+			break;
+	}
+
+	if (rv != CKR_OK)
+	{
+		session->resetOp();
+		return rv;
+	}
+
+	CK_ULONG neededLen = (CK_ULONG)response.size();
+	bool tooSmall = *pulSignatureLen < neededLen;
+	if (!tooSmall)
+	{
+		memcpy(pSignature, response.data(), response.size());
+	}
+	*pulSignatureLen = neededLen;
+
+	if (!response.empty())
+		memset(response.data(), 0, response.size());
+
+	// Reset unconditionally: the fresh RAND already generated for this
+	// call must not be reused by a caller retrying after
+	// CKR_BUFFER_TOO_SMALL. Callers should query the size with
+	// pSignature == NULL_PTR first, which never generates RAND.
+	session->resetOp();
+
+	return tooSmall ? CKR_BUFFER_TOO_SMALL : CKR_OK;
+}
+#endif // WITH_MILENAGE
+
 CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+#ifdef WITH_MILENAGE
+	if (isMilenageMechanism(pMechanism))
+		return MilenageSignInit(hSession, pMechanism, hKey);
+#endif
 	if (isMacMechanism(pMechanism))
 		return MacSignInit(hSession, pMechanism, hKey);
 	else
@@ -4959,6 +5358,11 @@ CK_RV SoftHSM::C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ul
 	Session* session = (Session*)handleManager->getSession(hSession);
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
+#ifdef WITH_MILENAGE
+	if (session->getOpType() == SESSION_OP_MILENAGE)
+		return MilenageSign(hSession, pData, ulDataLen, pSignature, pulSignatureLen);
+#endif
+
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_SIGN)
 		return CKR_OPERATION_NOT_INITIALIZED;
@@ -5036,6 +5440,17 @@ CK_RV SoftHSM::C_SignUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_UL
 	// Get the session
 	Session* session = (Session*)handleManager->getSession(hSession);
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+#ifdef WITH_MILENAGE
+	// Multipart operation is explicitly unsupported for the Milenage
+	// vendor mechanisms (design doc section 7 / spec section 5). Reset
+	// the operation so the caller isn't left with a stuck session.
+	if (session->getOpType() == SESSION_OP_MILENAGE)
+	{
+		session->resetOp();
+		return CKR_FUNCTION_NOT_SUPPORTED;
+	}
+#endif
 
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_SIGN)
@@ -5159,6 +5574,14 @@ CK_RV SoftHSM::C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, C
 	// Get the session
 	Session* session = (Session*)handleManager->getSession(hSession);
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+#ifdef WITH_MILENAGE
+	if (session->getOpType() == SESSION_OP_MILENAGE)
+	{
+		session->resetOp();
+		return CKR_FUNCTION_NOT_SUPPORTED;
+	}
+#endif
 
 	// Check if we are doing the correct operation
 	if (session->getOpType() != SESSION_OP_SIGN || !session->getAllowMultiPartOp())

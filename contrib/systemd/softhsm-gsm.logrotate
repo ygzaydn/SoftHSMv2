@@ -1,0 +1,48 @@
+# logrotate config for softhsm-gsm. Installed to
+# /etc/logrotate.d/softhsm-gsm by install.sh.
+#
+# Two stanzas, because the two kinds of files here behave differently:
+#
+# 1. softhsm-gsm.log -- the currently-active log, continuously
+#    appended to by the running daemon (systemd's StandardOutput=append:).
+#    copytruncate is required: the daemon has no SIGHUP/reopen handling,
+#    so a plain rename would leave it writing to a now-unlinked file
+#    forever. copytruncate instead copies the content out and truncates
+#    the original in place, which the daemon's already-open fd handles
+#    correctly with no signal needed.
+#
+# 2. softhsm-gsm-<timestamp>.log -- already-closed archives that
+#    contrib/systemd/rotate-log.sh creates on every service stop/restart
+#    (see softhsm2-gsm.service's ExecStopPost=). Nothing writes to
+#    these again, so they're compressed and aged out normally (no
+#    copytruncate needed -- there's no writer to avoid disrupting).
+
+/opt/softhsm2/logs/softhsm-gsm.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+# The PKCS#11 library also holds this file open while the daemon runs.
+/opt/softhsm2/logs/softhsm-pkcs11.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+/opt/softhsm2/logs/softhsm-gsm-*.log {
+    weekly
+    maxage 30
+    compress
+    missingok
+    notifempty
+    nocreate
+}
